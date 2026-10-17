@@ -1,0 +1,159 @@
+<resources>
+    <string name="app_name">HomeyWatch</string>
+
+    <!-- Tile -->
+    <string name="tile_quick_actions_label">Homey Quick Actions</string>
+    <string name="tile_quick_actions_desc">Quick control for favorite smart home devices</string>
+    <string name="tile_header_quick_actions">Quick Actions</string>
+    <string name="tile_open_app">Open HomeyWatch</string>
+    <string name="tile_slot_1_label">Homey 1</string>
+    <string name="tile_slot_2_label">Homey 2</string>
+    <string name="tile_slot_3_label">Homey 3</string>
+    <string name="tile_slot_4_label">Homey 4</string>
+
+    <!-- Setup Screen -->
+    <string name="setup_title">HomeyWatch</string>
+    <string name="setup_instruction">Control your Athom Homey Pro smart home directly from your wrist.</string>
+    <string name="setup_searching_homey">Searching for Homey on Wi-Fi...</string>
+    <string name="setup_found_homey_title">Homey Pro Detected</string>
+    <string name="setup_btn_connect_discovered">Connect to %s</string>
+    <string name="setup_btn_rescan">Search again</string>
+    <string name="setup_no_homey_found">No Homey found on local network</string>
+    <string name="setup_manual_entry_toggle">Enter ID manually</string>
+    <string name="setup_enter_homey_id">Enter Homey ID</string>
+    <string name="setup_btn_connect">Connect Hub</string>
+    <string name="setup_waiting_auth">Sending authorization to phone...</string>
+    <string name="setup_phone_opened">Check your phone to authorize access</string>
+    <string name="setup_auth_sent_title">Check Phone</string>
+    <string name="setup_auth_sent_desc">Tap the notification or sign in through your phone browser to connect.</string>
+    <string name="setup_no_phone_title">Scan QR Code</string>
+    <string name="setup_no_phone_desc">No phone connection detected. Scan this QR code with your phone camera to authorize.</string>
+    <string name="setup_btn_reopen_phone">Re-open on Phone</string>
+    <string name="setup_btn_show_qr">Show backup QR code</string>
+    <string name="setup_btn_hide_qr">Hide QR code</string>
+    <string name="setup_btn_cancel">Cancel</string>
+    <string name="setup_clear_id">Clear</string>
+    <string name="setup_input_hint">Type ID using keyboard (type \"demo\" for demo mode)</string>
+    <string name="setup_error_empty_id">Please enter your Homey ID</string>
+    <string name="setup_error_session_failed">Failed to start session on Homey</string>
+    <string name="setup_error_session_expired">Session expired. Try again.</string>
+    <string name="setup_error_auth_failed">Auth failed. Check Homey ID.</string>
+
+    <!-- Dashboard & Sections -->
+    <string name="demo_hub_title">Homey</string>
+    <string name="demo_hub_2_title">Beach House</string>
+    <string name="section_quick_access">QUICK ACCESS</string>
+    <string name="btn_flows">Automations (Flows)</string>
+    <string name="btn_retry">Retry</string>
+
+    <!-- Flows Screen -->
+    <string name="flows_title">Automations</string>
+    <string name="flows_empty">No triggerable flows found on this Homey.</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_homey_id">Homey ID: %s</string>
+    <string name="settings_user">User: %s</string>
+    <string name="settings_sync_interval">Dashboard Sync</string>
+    <string name="settings_sync_off">OFF</string>
+    <string name="settings_btn_disconnect">Disconnect Hub</string>
+    <string name="settings_hubs_header">Homey Hubs (%1$d/%2$d)</string>
+    <string name="settings_btn_add_hub">Add Homey Hub</string>
+    <string name="settings_hub_active_badge">Active</string>
+    <string name="settings_hub_tap_to_switch">Tap to activate</string>
+    <string name="settings_hub_slot_id">Homey %1$d: %2$s</string>
+    <string name="settings_btn_delete_hub">Remove</string>
+    <string name="settings_hubs_max_reached">Max 4 hubs limit reached</string>
+    <string name="settings_btn_disconnect_all">Disconnect All Hubs</string>
+    <string name="setup_title_add_hub">Add Homey Hub</string>
+
+    <!-- Demo Mock Devices & Zones -->
+    <string name="demo_device_living_light">Living Room Light</string>
+    <string name="demo_device_kitchen_light">Kitchen Spotlight</string>
+    <string name="demo_device_garden_light">Garden Light</string>
+    <string name="demo_device_patio_light">Patio Light</string>
+    <string name="demo_device_front_door">Front Door</string>
+    <string name="demo_device_gate">Main Gate</string>
+    <string name="demo_device_main_garage">Main Garage</string>
+    <string name="demo_device_living_thermostat">Living Room Thermostat</string>
+    <string name="demo_zone_ground_floor">Ground Floor</string>
+    <string name="demo_zone_outside">Outside</string>
+
+    <!-- Device States & Badges -->
+    <string name="device_state_on">On</string>
+    <string name="device_state_off">Off</string>
+    <string name="device_state_open">Open</string>
+    <string name="device_state_closed">Closed</string>
+    <string name="device_state_locked">Locked</string>
+    <string name="device_state_unlocked">Unlocked</string>
+    <string name="device_thermostat_target">Target: %s</string>
+    <string name="device_thermostat_current">Current: %s</string>
+    <string name="device_action_push">Press</string>
+    <string name="device_action_toggle">Toggle</string>
+
+    <!-- Detail Screens -->
+    <string name="detail_brightness_title">Brightness</string>
+    <string name="detail_color_title">Color</string>
+    <string name="detail_color_presets">Color Presets</string>
+    <string name="detail_temp_presets">White Tone</string>
+    <string name="detail_temp_warm">Warm</string>
+    <string name="detail_temp_natural">Natural</string>
+    <string name="detail_temp_cold">Cool</string>
+    <string name="detail_thermostat_title">Thermostat</string>
+    <string name="detail_thermostat_target_label">Target Temperature</string>
+    <string name="detail_thermostat_current_label">Current: %s</string>
+
+    <!-- Repository Error & Status Strings -->
+    <string name="repo_zone_unknown">Unknown</string>
+    <string name="repo_error_not_configured">Homey not configured. Check settings.</string>
+    <string name="repo_error_devices_http">Device error: HTTP %d</string>
+    <string name="repo_error_zones_http">Zone error: HTTP %d</string>
+    <string name="repo_error_conn_failed">Connection failed: %s</string>
+    <string name="repo_error_network">Network error: %s</string>
+    <string name="repo_error_toggle_http">HTTP Error %d: unable to set capability</string>
+    <string name="repo_error_sync_failed">Sync failed: %s</string>
+    <string name="repo_success_toggle">Command sent successfully</string>
+    <string name="repo_success_flow">Flow triggered successfully</string>
+    <string name="repo_error_flow_http">Flow error: HTTP %d</string>
+    <string name="repo_error_flow_trigger_http">HTTP Error %d: unable to trigger flow</string>
+    <string name="repo_error_dashboards_http">Dashboard error: HTTP %d</string>
+    <string name="demo_folder_automations">Automations</string>
+    <string name="demo_folder_security">Security</string>
+    <string name="demo_flow_leaving_home">Leaving Home</string>
+    <string name="demo_flow_arriving_home">Arriving Home</string>
+    <string name="demo_flow_goodnight">Goodnight</string>
+    <string name="demo_flow_welcome">Welcome Home</string>
+
+    <!-- Device Detail Multi-Tab & History -->
+    <string name="tab_onoff">Power</string>
+    <string name="tab_thermostat">Thermostat</string>
+    <string name="tab_dim">Brightness</string>
+    <string name="tab_color">Color</string>
+    <string name="tab_recap">History</string>
+    <string name="recap_header">History</string>
+    <string name="recap_loading_history">Loading history...</string>
+    <string name="recap_no_history">No history available</string>
+    <string name="recap_error_history">Failed to load history</string>
+    <string name="recap_current_status">Status</string>
+    <string name="device_history_turned_on">Turned on</string>
+    <string name="device_history_turned_off">Turned off</string>
+    <string name="device_history_dimmed">Brightness: %d%%</string>
+    <string name="time_just_now">Just now</string>
+    <string name="time_minutes_ago">%d min ago</string>
+    <string name="time_hours_ago">%d h ago</string>
+    <string name="time_yesterday">Yesterday</string>
+    <string name="time_days_ago">%d days ago</string>
+    <string name="tab_volume">Volume</string>
+    <string name="tab_position">Position</string>
+    <string name="tab_lock">Lock</string>
+    <string name="tab_garage">Garage</string>
+    <string name="cap_select_title">Select Control</string>
+    <string name="color_mode_rgb">Color</string>
+    <string name="color_mode_temperature">White</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_devices">Devices</string>
+    <string name="nav_flows">Flows</string>
+    <string name="nav_settings">Settings</string>
+    <string name="home_favorites_title">Favorites</string>
+    <string name="home_no_favorites">No favorite devices configured</string>
+</resources>

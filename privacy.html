@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Privacy Policy - Homey for Wear OS</title>
+    <meta name="description" content="Privacy Policy for Homey for Wear OS (Homey per Wear OS) smartwatch application.">
+    <style>
+        :root {
+            --bg-color: #f8fafc;
+            --card-bg: #ffffff;
+            --text-main: #0f172a;
+            --text-muted: #475569;
+            --primary: #0284c7;
+            --primary-hover: #0369a1;
+            --border-color: #e2e8f0;
+            --badge-bg: #e0f2fe;
+            --badge-text: #0369a1;
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-color: #0b1120;
+                --card-bg: #1e293b;
+                --text-main: #f8fafc;
+                --text-muted: #94a3b8;
+                --primary: #38bdf8;
+                --primary-hover: #0ea5e9;
+                --border-color: #334155;
+                --badge-bg: #0c4a6e;
+                --badge-text: #bae6fd;
+            }
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            line-height: 1.65;
+            padding: 2rem 1rem;
+        }
+
+        .container {
+            max-width: 860px;
+            margin: 0 auto;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 2.5rem;
+            box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        header {
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 1.5rem;
+            margin-bottom: 2rem;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .header-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .brand-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            background-color: var(--badge-bg);
+            color: var(--badge-text);
+            padding: 0.35rem 0.85rem;
+            border-radius: 9999px;
+            font-size: 0.875rem;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+
+        .lang-switch {
+            display: flex;
+            gap: 0.5rem;
+            background-color: var(--bg-color);
+            padding: 0.25rem;
+            border-radius: 8px;
+            border: 1px solid var(--border-color);
+        }
+
+        .lang-btn {
+            border: none;
+            background: transparent;
+            color: var(--text-muted);
+            padding: 0.4rem 0.9rem;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .lang-btn.active {
+            background-color: var(--card-bg);
+            color: var(--primary);
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            font-size: 1.95rem;
+            font-weight: 700;
+            color: var(--text-main);
+            letter-spacing: -0.02em;
+        }
+
+        .last-updated {
+            font-size: 0.875rem;
+            color: var(--text-muted);
+        }
+
+        h2 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-top: 1.75rem;
+            margin-bottom: 0.75rem;
+            color: var(--primary);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 0.35rem;
+        }
+
+        p {
+            margin-bottom: 1rem;
+            color: var(--text-main);
+        }
+
+        ul {
+            margin-bottom: 1.25rem;
+            padding-left: 1.5rem;
+        }
+
+        li {
+            margin-bottom: 0.5rem;
+            color: var(--text-main);
+        }
+
+        .highlight-box {
+            background-color: var(--bg-color);
+            border-left: 4px solid var(--primary);
+            padding: 1rem 1.25rem;
+            border-radius: 0 8px 8px 0;
+            margin: 1.25rem 0;
+            font-size: 0.95rem;
+        }
+
+        .highlight-box p:last-child {
+            margin-bottom: 0;
+        }
+
+        .code-inline {
+            background: var(--bg-color);
+            border: 1px solid var(--border-color);
+            padding: 0.15rem 0.35rem;
+            border-radius: 4px;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            font-size: 0.875em;
+        }
+
+        .disclaimer-card {
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            padding: 1.25rem;
+            border-radius: 10px;
+            margin-top: 2rem;
+            font-size: 0.9rem;
+            color: var(--text-muted);
+        }
+
+        footer {
+            margin-top: 2.5rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border-color);
+            text-align: center;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        .lang-section {
+            display: none;
+        }
+
+        .lang-section.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="header-top">
+                <span class="brand-badge">Homey for Wear OS</span>
+                <div class="lang-switch">
+                    <button class="lang-btn active" id="btn-en" onclick="setLanguage('en')">English</button>
+                    <button class="lang-btn" id="btn-it" onclick="setLanguage('it')">Italiano</button>
+                </div>
+            </div>
+            <div>
+                <h1 id="page-title">Privacy Policy</h1>
+                <p class="last-updated" id="page-updated">Last updated: October 17, 2026</p>
+            </div>
+        </header>
+
+        <!-- ENGLISH SECTION -->
+        <main id="content-en" class="lang-section active">
+            <div class="highlight-box">
+                <p><strong>Summary:</strong> Homey for Wear OS does not collect, store, or share any personal data on external servers. All authentication tokens and preferences stay strictly encrypted on your smartwatch and communicate directly with your Athom Homey Pro hub.</p>
+            </div>
+
+            <h2>1. Introduction & Overview</h2>
+            <p>This Privacy Policy explains how <strong>Homey for Wear OS</strong> (the "Application") handles data when you use the app on your Wear OS smartwatch. The Application operates as a standalone client for Athom Homey Pro hubs, allowing you to manage and interact with your smart home directly from your wrist.</p>
+
+            <h2>2. Information Processed by the Application</h2>
+            <p>The Application processes only the technical data strictly necessary to communicate with your smart home:</p>
+            <ul>
+                <li><strong>Authentication Tokens:</strong> OAuth2 access and session tokens generated via Athom Cloud and your Homey Pro hub to authenticate your requests.</li>
+                <li><strong>Device States & Attributes:</strong> Real-time parameters of configured smart home devices (e.g., on/off state, measured temperatures, lock status, and recent state changes) displayed on your watch screen.</li>
+                <li><strong>Local Network Discovery Data:</strong> During initial setup, the app searches your local Wi-Fi for service type <span class="code-inline">_homey._tcp</span> (via mDNS) to discover the local IP address and port of your Homey Pro hub.</li>
+            </ul>
+
+            <h2>3. Zero Data Collection & Zero Third-Party Sharing</h2>
+            <p>We respect your privacy by design:</p>
+            <ul>
+                <li><strong>No Developer Servers:</strong> We do not operate, host, or maintain any external databases or cloud servers. The Application does not transmit any information to us.</li>
+                <li><strong>No Analytics or Trackers:</strong> The Application contains <strong>no tracking tools</strong>, <strong>no analytics SDKs</strong> (such as Firebase Analytics or Google Analytics), and <strong>no advertising frameworks</strong>.</li>
+                <li><strong>No Health or Location Tracking:</strong> The Application does not access smartwatch health/biometric sensors (heart rate, step counts) nor does it collect GPS location coordinates.</li>
+            </ul>
+
+            <h2>4. Data Storage & Security (Android Keystore)</h2>
+            <p>All authentication credentials and user preferences (such as active hub selection, sync interval, and quick-action Tile assignments) are stored solely on your smartwatch:</p>
+            <ul>
+                <li>Data is saved using Android's <span class="code-inline">EncryptedSharedPreferences</span>, backed by hardware encryption (<strong>AES-256-GCM</strong> for values and <strong>AES-256-SIV</strong> for keys) provided by the device's <strong>Android Keystore</strong>.</li>
+                <li>Stored data is sandboxed at the operating system level and cannot be accessed by other applications installed on your watch.</li>
+            </ul>
+
+            <h2>5. Network Destinations</h2>
+            <p>All network traffic generated by the Application is routed strictly and directly between your smartwatch and:</p>
+            <ul>
+                <li><strong>Your local Athom Homey Pro hub</strong> on your home Wi-Fi network.</li>
+                <li><strong>Official Athom Cloud APIs</strong> (<span class="code-inline">https://*.connect.athom.com</span> and <span class="code-inline">https://api.athom.com</span>) over secure, encrypted HTTPS/TLS connections for remote access and token renewal.</li>
+            </ul>
+
+            <h2>6. Android Permissions Requested</h2>
+            <p>The Application requests only standard permissions essential to its core functions:</p>
+            <ul>
+                <li><span class="code-inline">android.permission.INTERNET</span>: To communicate with your Homey Pro hub locally and via Athom cloud APIs.</li>
+                <li><span class="code-inline">android.permission.ACCESS_NETWORK_STATE</span>: To verify active connectivity before sending commands.</li>
+                <li><span class="code-inline">android.permission.ACCESS_WIFI_STATE</span>: To inspect Wi-Fi status for local communication.</li>
+                <li><span class="code-inline">android.permission.CHANGE_WIFI_MULTICAST_STATE</span>: Temporarily acquired during initial setup to discover local hubs via multicast DNS (mDNS).</li>
+                <li><span class="code-inline">android.permission.WAKE_LOCK</span>: To ensure fast and reliable execution of Wear OS Tile actions in the background.</li>
+            </ul>
+
+            <h2>7. Data Retention & Deletion (Your Right to Erasure)</h2>
+            <p>Because all data resides exclusively in your smartwatch's local storage, you have complete control over your data at all times:</p>
+            <ul>
+                <li>Tapping <strong>"Disconnect"</strong> in the Application's Settings screen immediately and permanently purges all authentication tokens, hub identifiers, and cached data from the device.</li>
+                <li>Uninstalling the Application or clearing its storage through Wear OS System Settings also permanently deletes all stored data immediately.</li>
+            </ul>
+
+            <h2>8. Contact & Inquiries</h2>
+            <p>If you have any questions or feedback regarding this Privacy Policy, please reach out via the official developer contact information provided on the Google Play Store listing.</p>
+
+            <div class="disclaimer-card">
+                <strong>Disclaimer:</strong> Homey for Wear OS is an independent third-party app and is not an official product. It is not affiliated with, endorsed, or sponsored by Athom B.V., owner of the registered trademarks Homey and Homey Pro.
+            </div>
+        </main>
+
+        <!-- ITALIAN SECTION -->
+        <main id="content-it" class="lang-section">
+            <div class="highlight-box">
+                <p><strong>In sintesi:</strong> Homey per Wear OS non raccoglie, non memorizza e non condivide alcun dato personale su server esterni. Tutti i token di accesso e le preferenze rimangono crittografati esclusivamente sul tuo smartwatch e comunicano direttamente con il tuo hub Athom Homey Pro.</p>
+            </div>
+
+            <h2>1. Introduzione e Panoramica</h2>
+            <p>La presente Informativa sulla Privacy descrive le modalità di trattamento dei dati da parte dell'applicazione <strong>Homey per Wear OS</strong> (l'"Applicazione") durante l'utilizzo su smartwatch Wear OS. L'Applicazione è un client autonomo (standalone) per hub Athom Homey Pro, progettato per consentirti di controllare la tua casa intelligente direttamente dal polso.</p>
+
+            <h2>2. Dati Trattati dall'Applicazione</h2>
+            <p>L'Applicazione tratta unicamente i dati tecnici strettamente necessari all'interazione con la tua smart home:</p>
+            <ul>
+                <li><strong>Token di Autenticazione:</strong> Token OAuth2 di sessione generati tramite i servizi Athom Cloud e il tuo hub Homey Pro per autorizzare i comandi impartiti dall'orologio.</li>
+                <li><strong>Stato e Attributi dei Dispositivi:</strong> Parametri in tempo reale dei dispositivi configurati (stato acceso/spento, temperatura rilevata, stato serrature, cronologia recente) visualizzati a schermo su richiesta dell'utente.</li>
+                <li><strong>Parametri di Rete Locale:</strong> Durante la prima configurazione, l'app interroga la rete Wi-Fi locale per il servizio <span class="code-inline">_homey._tcp</span> (tramite mDNS) al fine di identificare l'indirizzo IP e la porta dell'hub Homey Pro.</li>
+            </ul>
+
+            <h2>3. Nessuna Raccolta e Nessuna Condivisione con Terzi</h2>
+            <p>La riservatezza dei tuoi dati è garantita dall'architettura dell'app:</p>
+            <ul>
+                <li><strong>Zero Server Proprietari:</strong> Lo sviluppatore non possiede, non gestisce e non utilizza alcun server o database cloud esterno. L'Applicazione non invia alcuna informazione allo sviluppatore.</li>
+                <li><strong>Zero Analytics e Pubblicità:</strong> L'Applicazione non contiene <strong>alcuno strumento di tracciamento</strong>, <strong>nessun SDK di analisi</strong> (come Firebase o Google Analytics) e <strong>nessuna libreria pubblicitaria</strong>.</li>
+                <li><strong>Nessun Dato Sanitario o di Geolocalizzazione:</strong> L'Applicazione non accede ai sensori biometrici dello smartwatch (battito cardiaco, contapassi) né ai dati di posizione GPS.</li>
+            </ul>
+
+            <h2>4. Archiviazione e Sicurezza dei Dati (Android Keystore)</h2>
+            <p>Tutte le credenziali di accesso e le preferenze dell'utente (hub attivo, intervallo di sincronizzazione, assegnazione dei riquadri Wear OS) sono memorizzate unicamente sullo smartwatch:</p>
+            <ul>
+                <li>I dati sono salvati tramite <span class="code-inline">EncryptedSharedPreferences</span> con crittografia hardware (<strong>AES-256-GCM</strong> per i valori e <strong>AES-256-SIV</strong> per le chiavi) gestita dall'<strong>Android Keystore</strong> del dispositivo.</li>
+                <li>I dati risultano isolati a livello di sistema operativo Wear OS e non sono accessibili ad altre applicazioni installate sull'orologio.</li>
+            </ul>
+
+            <h2>5. Destinatari delle Comunicazioni di Rete</h2>
+            <p>Tutte le richieste di rete inviate dall'Applicazione avvengono in modo diretto ed esclusivo tra lo smartwatch e:</p>
+            <ul>
+                <li><strong>Il tuo hub locale Athom Homey Pro</strong> sulla rete Wi-Fi di casa.</li>
+                <li><strong>Le API cloud ufficiali di Athom</strong> (<span class="code-inline">https://*.connect.athom.com</span> e <span class="code-inline">https://api.athom.com</span>) tramite connessioni crittografate HTTPS/TLS per il controllo remoto e il rinnovo dei token.</li>
+            </ul>
+
+            <h2>6. Permessi Android Richiesti</h2>
+            <p>L'Applicazione richiede esclusivamente i permessi indispensabili per le sue funzionalità principali:</p>
+            <ul>
+                <li><span class="code-inline">android.permission.INTERNET</span>: Per comunicare con l'hub Homey Pro sia in locale che tramite cloud protetto.</li>
+                <li><span class="code-inline">android.permission.ACCESS_NETWORK_STATE</span>: Per verificare lo stato della rete prima dell'invio dei comandi.</li>
+                <li><span class="code-inline">android.permission.ACCESS_WIFI_STATE</span>: Per verificare lo stato della connettività Wi-Fi locale.</li>
+                <li><span class="code-inline">android.permission.CHANGE_WIFI_MULTICAST_STATE</span>: Utilizzato temporaneamente durante la ricerca automatica dell'hub via mDNS.</li>
+                <li><span class="code-inline">android.permission.WAKE_LOCK</span>: Per assicurare l'esecuzione rapida e fluida delle azioni dei riquadri (Tiles) dell'orologio.</li>
+            </ul>
+
+            <h2>7. Conservazione e Cancellazione dei Dati (Diritto all'Oblio)</h2>
+            <p>Poiché tutti i dati risiedono esclusivamente nella memoria crittografata del tuo smartwatch, hai il pieno controllo sulle tue informazioni in qualsiasi momento:</p>
+            <ul>
+                <li>Toccando il pulsante <strong>"Disconnetti"</strong> nelle Impostazioni dell'Applicazione, tutti i token di accesso, gli identificativi dell'hub e i dati memorizzati vengono cancellati immediatamente e definitivamente dal dispositivo.</li>
+                <li>Anche la disinstallazione dell'Applicazione o la cancellazione dei dati tramite le impostazioni di Wear OS elimina irrevocabilmente tutti i dati memorizzati.</li>
+            </ul>
+
+            <h2>8. Contatti</h2>
+            <p>Per qualsiasi domanda o chiarimento riguardante la presente Informativa sulla Privacy, puoi contattare lo sviluppatore tramite i recapiti ufficiali disponibili nella scheda dell'applicazione su Google Play Store.</p>
+
+            <div class="disclaimer-card">
+                <strong>Disclaimer:</strong> Homey per Wear OS è un'applicazione indipendente di terze parti e non è un prodotto ufficiale. Non è affiliata, approvata né sponsorizzata da Athom B.V., proprietaria dei marchi registrati Homey e Homey Pro.
+            </div>
+        </main>
+
+        <footer>
+            <p>&copy; 2026 Homey for Wear OS (Homey per Wear OS). All rights reserved.</p>
+        </footer>
+    </div>
+
+    <script>
+        function setLanguage(lang) {
+            const contentEn = document.getElementById('content-en');
+            const contentIt = document.getElementById('content-it');
+            const btnEn = document.getElementById('btn-en');
+            const btnIt = document.getElementById('btn-it');
+            const pageTitle = document.getElementById('page-title');
+            const pageUpdated = document.getElementById('page-updated');
+
+            if (lang === 'it') {
+                contentEn.classList.remove('active');
+                contentIt.classList.add('active');
+                btnEn.classList.remove('active');
+                btnIt.classList.add('active');
+                pageTitle.textContent = "Informativa sulla Privacy";
+                pageUpdated.textContent = "Ultimo aggiornamento: 17 Ottobre 2026";
+                document.documentElement.lang = "it";
+            } else {
+                contentIt.classList.remove('active');
+                contentEn.classList.add('active');
+                btnIt.classList.remove('active');
+                btnEn.classList.add('active');
+                pageTitle.textContent = "Privacy Policy";
+                pageUpdated.textContent = "Last updated: October 17, 2026";
+                document.documentElement.lang = "en";
+            }
+        }
+
+        // Auto-detect browser language
+        document.addEventListener('DOMContentLoaded', () => {
+            const userLang = navigator.language || navigator.userLanguage;
+            if (userLang && userLang.toLowerCase().startsWith('it')) {
+                setLanguage('it');
+            }
+        });
+    </script>
+</body>
+</html>

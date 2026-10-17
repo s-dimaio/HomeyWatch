@@ -1,0 +1,140 @@
+<resources>
+    <string name="app_name">HomeyWatch</string>
+
+    <!-- Tile -->
+    <string name="tile_quick_actions_label">Azioni Rapide Homey</string>
+    <string name="tile_quick_actions_desc">Controllo rapido per i dispositivi smart home preferiti</string>
+    <string name="tile_header_quick_actions">Azioni Rapide</string>
+    <string name="tile_open_app">Apri HomeyWatch</string>
+    <string name="tile_slot_1_label">Homey 1</string>
+    <string name="tile_slot_2_label">Homey 2</string>
+    <string name="tile_slot_3_label">Homey 3</string>
+    <string name="tile_slot_4_label">Homey 4</string>
+
+    <!-- Setup Screen -->
+    <string name="setup_title">HomeyWatch</string>
+    <string name="setup_instruction">Controlla la tua smart home Athom Homey Pro direttamente dal polso.</string>
+    <string name="setup_searching_homey">Ricerca Homey sulla rete Wi-Fi...</string>
+    <string name="setup_found_homey_title">Homey Pro Rilevato</string>
+    <string name="setup_btn_connect_discovered">Connetti a %s</string>
+    <string name="setup_btn_rescan">Cerca di nuovo</string>
+    <string name="setup_no_homey_found">Nessun Homey trovato sulla rete locale</string>
+    <string name="setup_manual_entry_toggle">Inserisci ID manualmente</string>
+    <string name="setup_enter_homey_id">Inserisci Homey ID</string>
+    <string name="setup_btn_connect">Connetti Hub</string>
+    <string name="setup_waiting_auth">Invio autorizzazione allo smartphone...</string>
+    <string name="setup_phone_opened">Controlla lo smartphone per autorizzare l\'accesso</string>
+    <string name="setup_auth_sent_title">Controlla il Telefono</string>
+    <string name="setup_auth_sent_desc">Tocca la notifica o apri il browser sullo smartphone per completare l\'accesso.</string>
+    <string name="setup_no_phone_title">Inquadra il QR Code</string>
+    <string name="setup_no_phone_desc">Nessuno smartphone rilevato via Bluetooth. Inquadra il QR code con la fotocamera per accedere.</string>
+    <string name="setup_btn_reopen_phone">Riapri su Smartphone</string>
+    <string name="setup_btn_show_qr">Mostra QR code di riserva</string>
+    <string name="setup_btn_hide_qr">Nascondi QR code</string>
+    <string name="setup_btn_cancel">Annulla</string>
+    <string name="setup_clear_id">Cancella</string>
+    <string name="setup_input_hint">Digita l\'ID con la tastiera (scrivi \"demo\" per la modalità demo)</string>
+    <string name="setup_error_empty_id">Inserisci il tuo Homey ID</string>
+    <string name="setup_error_session_failed">Impossibile avviare la sessione su Homey</string>
+    <string name="setup_error_session_expired">Sessione scaduta. Riprova.</string>
+    <string name="setup_error_auth_failed">Autenticazione fallita. Verifica l\'Homey ID.</string>
+
+    <!-- Dashboard & Sections -->
+    <string name="section_quick_access">ACCESSO RAPIDO</string>
+    <string name="btn_flows">Automazioni (Flows)</string>
+    <string name="btn_retry">Riprova</string>
+
+    <!-- Flows Screen -->
+    <string name="flows_title">Automazioni</string>
+    <string name="flows_empty">Nessun flow avviabile manualmente trovato su questo Homey.</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_title">Impostazioni</string>
+    <string name="settings_homey_id">Homey ID: %s</string>
+    <string name="settings_user">Utente: %s</string>
+    <string name="settings_sync_interval">Aggiornamento automatico</string>
+    <string name="settings_sync_off">OFF</string>
+    <string name="settings_btn_disconnect">Disconnetti Hub</string>
+    <string name="settings_hubs_header">Hub Homey (%1$d/%2$d)</string>
+    <string name="settings_btn_add_hub">Aggiungi Hub Homey</string>
+    <string name="settings_hub_active_badge">Attivo</string>
+    <string name="settings_hub_tap_to_switch">Tocca per attivare</string>
+    <string name="settings_hub_slot_id">Homey %1$d: %2$s</string>
+    <string name="settings_btn_delete_hub">Rimuovi</string>
+    <string name="settings_hubs_max_reached">Limite massimo di 4 hub raggiunto</string>
+    <string name="settings_btn_disconnect_all">Disconnetti tutti gli hub</string>
+    <string name="setup_title_add_hub">Aggiungi Hub Homey</string>
+
+
+    <!-- Device States & Badges -->
+    <string name="device_state_on">Accesa</string>
+    <string name="device_state_off">Spenta</string>
+    <string name="device_state_open">Aperto</string>
+    <string name="device_state_closed">Chiuso</string>
+    <string name="device_state_locked">Bloccato</string>
+    <string name="device_state_unlocked">Sbloccato</string>
+    <string name="device_thermostat_target">Target: %s</string>
+    <string name="device_thermostat_current">Attuale: %s</string>
+    <string name="device_action_push">Premi</string>
+    <string name="device_action_toggle">Attiva</string>
+
+    <!-- Detail Screens -->
+    <string name="detail_brightness_title">Luminosità</string>
+    <string name="detail_color_title">Colore</string>
+    <string name="detail_color_presets">Preset Colori</string>
+    <string name="detail_temp_presets">Tonalità Bianco</string>
+    <string name="detail_temp_warm">Caldo</string>
+    <string name="detail_temp_natural">Naturale</string>
+    <string name="detail_temp_cold">Freddo</string>
+    <string name="detail_thermostat_title">Termostato</string>
+    <string name="detail_thermostat_target_label">Temperatura Desiderata</string>
+    <string name="detail_thermostat_current_label">Attuale: %s</string>
+
+    <!-- Repository Error & Status Strings -->
+    <string name="repo_zone_unknown">Sconosciuta</string>
+    <string name="repo_error_not_configured">Homey non configurato. Controlla le impostazioni.</string>
+    <string name="repo_error_devices_http">Errore dispositivi: HTTP %d</string>
+    <string name="repo_error_zones_http">Errore zone: HTTP %d</string>
+    <string name="repo_error_conn_failed">Connessione fallita: %s</string>
+    <string name="repo_error_network">Errore di rete: %s</string>
+    <string name="repo_error_toggle_http">Errore HTTP %d: impossibile impostare la capability</string>
+    <string name="repo_error_sync_failed">Sincronizzazione fallita: %s</string>
+    <string name="repo_success_toggle">Comando inviato con successo</string>
+    <string name="repo_success_flow">Flow avviato con successo</string>
+    <string name="repo_error_flow_http">Errore Flow: HTTP %d</string>
+    <string name="repo_error_flow_trigger_http">Errore HTTP %d: impossibile avviare il Flow</string>
+    <string name="repo_error_dashboards_http">Errore dashboard: HTTP %d</string>
+
+    <!-- Device Detail Multi-Tab & History -->
+    <string name="tab_onoff">Accensione</string>
+    <string name="tab_thermostat">Termostato</string>
+    <string name="tab_dim">Luminosità</string>
+    <string name="tab_color">Colore</string>
+    <string name="tab_recap">Cronologia</string>
+    <string name="recap_header">Cronologia</string>
+    <string name="recap_loading_history">Caricamento cronologia...</string>
+    <string name="recap_no_history">Nessuna cronologia disponibile</string>
+    <string name="recap_error_history">Impossibile caricare la cronologia</string>
+    <string name="recap_current_status">Stato</string>
+    <string name="device_history_turned_on">Accesa</string>
+    <string name="device_history_turned_off">Spenta</string>
+    <string name="device_history_dimmed">Luminosità: %d%%</string>
+    <string name="time_just_now">Poco fa</string>
+    <string name="time_minutes_ago">%d min fa</string>
+    <string name="time_hours_ago">%d ore fa</string>
+    <string name="time_yesterday">Ieri</string>
+    <string name="time_days_ago">%d giorni fa</string>
+    <string name="tab_volume">Volume</string>
+    <string name="tab_position">Posizione</string>
+    <string name="tab_lock">Serratura</string>
+    <string name="tab_garage">Garage</string>
+    <string name="cap_select_title">Seleziona controllo</string>
+    <string name="color_mode_rgb">Colore</string>
+    <string name="color_mode_temperature">Bianco</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_devices">Dispositivi</string>
+    <string name="nav_flows">Flow</string>
+    <string name="nav_settings">Impostazioni</string>
+    <string name="home_favorites_title">Preferiti</string>
+    <string name="home_no_favorites">Nessun dispositivo preferito</string>
+</resources>
