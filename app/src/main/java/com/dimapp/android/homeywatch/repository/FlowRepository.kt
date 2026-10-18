@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.dimapp.android.homeywatch.R
 import com.dimapp.android.homeywatch.api.models.FlowDto
+import com.dimapp.android.homeywatch.api.models.FlowTriggerRequestDto
 import com.dimapp.android.homeywatch.repository.models.HomeyResult
 import com.dimapp.android.homeywatch.auth.HomeyAuthRepository
 import com.dimapp.android.homeywatch.storage.TokenStorage
@@ -64,21 +65,34 @@ class FlowRepository(
         val service = _buildService() 
             ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
-        Log.d(TAG, "Fetching flows and folders from network (forceRefresh=$forceRefresh)...")
+        Log.d(TAG, "Fetching flows, advanced flows, and folders from network (forceRefresh=$forceRefresh)...")
         return try {
             coroutineScope {
-                val flowsDeferred = async { service.getFlows() }
+                val flowsDeferred = async {
+                    try { service.getFlows() } catch (e: Exception) { null }
+                }
+                val advFlowsDeferred = async {
+                    try { service.getAdvancedFlows() } catch (e: Exception) { null }
+                }
                 val foldersDeferred = async {
-                    try { service.getFlowFolders() } catch (e: Exception) { null }
+                    try {
+                        val res = service.getFlowFolders()
+                        if (res.isSuccessful && res.body() != null) res
+                        else service.getFlowFoldersAlt()
+                    } catch (e: Exception) {
+                        try { service.getFlowFoldersAlt() } catch (e2: Exception) { null }
+                    }
                 }
 
                 val flowsResponse = flowsDeferred.await()
+                val advFlowsResponse = advFlowsDeferred.await()
                 val foldersResponse = foldersDeferred.await()
 
-                if (!flowsResponse.isSuccessful) {
-                    Log.e(TAG, "Flows fetch failed: HTTP ${flowsResponse.code()}")
+                if (flowsResponse?.isSuccessful != true && advFlowsResponse?.isSuccessful != true) {
+                    val code = flowsResponse?.code() ?: advFlowsResponse?.code() ?: 500
+                    Log.e(TAG, "Flows fetch failed: HTTP $code")
                     return@coroutineScope HomeyResult.Error(
-                        context.getString(R.string.repo_error_flow_http, flowsResponse.code())
+                        context.getString(R.string.repo_error_flow_http, code)
                     )
                 }
 
@@ -88,8 +102,23 @@ class FlowRepository(
                     emptyMap()
                 }
 
-                val flows = (flowsResponse.body() ?: emptyMap()).values
-                    .filter { it.triggerable == true && it.enabled != false }
+                val standardFlows = if (flowsResponse?.isSuccessful == true) {
+                    (flowsResponse.body() ?: emptyMap()).values
+                        .filter { it.triggerable == true && it.enabled != false && it.broken != true }
+                        .map { it.copy(isAdvanced = false) }
+                } else {
+                    emptyList()
+                }
+
+                val advancedFlows = if (advFlowsResponse?.isSuccessful == true) {
+                    (advFlowsResponse.body() ?: emptyMap()).values
+                        .filter { it.triggerable == true && it.enabled != false && it.broken != true }
+                        .map { it.copy(isAdvanced = true) }
+                } else {
+                    emptyList()
+                }
+
+                val flows = (standardFlows + advancedFlows)
                     .map { flow ->
                         val resolvedFolderName = flow.folder?.let { foldersMap[it]?.effectiveName }
                         flow.copy(folderName = resolvedFolderName)
@@ -101,7 +130,7 @@ class FlowRepository(
 
                 cachedFlows = flows
                 cachedHubId = currentHubId
-                Log.d(TAG, "Fetched and cached ${flows.size} triggerable flows.")
+                Log.d(TAG, "Fetched and cached ${flows.size} triggerable flows (${standardFlows.size} standard, ${advancedFlows.size} advanced).")
                 HomeyResult.Success(flows)
             }
         } catch (e: Exception) {
@@ -138,18 +167,19 @@ class FlowRepository(
     }
 
     /**
-     * Triggers a Homey Flow by its UUID.
+     * Triggers a Homey Flow (standard or advanced) by its UUID.
      *
      * Public method.
      *
      * @param flowId UUID of the target Flow to trigger.
+     * @param isAdvanced Whether the flow is an Advanced Flow.
      * @return [HomeyResult.Success] with localized message on success, or [HomeyResult.Error].
      * @example
-     * val result = flowRepo.triggerFlow("flow-uuid-123")
+     * val result = flowRepo.triggerFlow("flow-uuid-123", isAdvanced = true)
      */
-    suspend fun triggerFlow(flowId: String): HomeyResult<String> {
+    suspend fun triggerFlow(flowId: String, isAdvanced: Boolean = false): HomeyResult<String> {
         if (storage.isDemoMode()) {
-            Log.d(TAG, "Triggered mock demo flow: $flowId")
+            Log.d(TAG, "Triggered mock demo flow: $flowId (isAdvanced=$isAdvanced)")
             return HomeyResult.Success(context.getString(R.string.repo_success_flow))
         }
 
@@ -157,13 +187,28 @@ class FlowRepository(
             ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
         return try {
-            val response = service.triggerFlow(flowId)
-            if (response.isSuccessful) {
+            Log.d(TAG, "[FlowRepository:triggerFlow] Triggering flow '$flowId' (isAdvanced=$isAdvanced) via companion proxy...")
+            val companionResponse = service.triggerCompanionFlow(
+                FlowTriggerRequestDto(id = flowId, isAdvanced = isAdvanced)
+            )
+            if (companionResponse.isSuccessful && companionResponse.body()?.success == true) {
+                Log.d(TAG, "[FlowRepository:triggerFlow] Flow '$flowId' (isAdvanced=$isAdvanced) triggered successfully via companion.")
                 HomeyResult.Success(context.getString(R.string.repo_success_flow))
             } else {
-                HomeyResult.Error(context.getString(R.string.repo_error_flow_trigger_http, response.code()))
+                val errorBody = companionResponse.errorBody()?.string().orEmpty()
+                val responseBodyError = companionResponse.body()?.error.orEmpty()
+                Log.e(TAG, "[FlowRepository:triggerFlow] Trigger flow '$flowId' failed: HTTP ${companionResponse.code()} - errorBody: $errorBody, responseError: $responseBodyError")
+
+                if (errorBody.contains("HOMEYSCRIPT", ignoreCase = true) ||
+                    responseBodyError.contains("HOMEYSCRIPT", ignoreCase = true)
+                ) {
+                    HomeyResult.Error(context.getString(R.string.repo_error_flow_homeyscript_missing))
+                } else {
+                    HomeyResult.Error(context.getString(R.string.repo_error_flow_trigger_http, companionResponse.code()))
+                }
             }
         } catch (e: Exception) {
+            Log.e(TAG, "[FlowRepository:triggerFlow] Exception triggering flow '$flowId': ${e.message}", e)
             HomeyResult.Error(context.getString(R.string.repo_error_network, e.message ?: "Unknown error"))
         }
     }
@@ -187,7 +232,8 @@ class FlowRepository(
                 triggerable = true,
                 enabled = true,
                 folder = "demo_folder_automations",
-                folderName = automationsFolder
+                folderName = automationsFolder,
+                isAdvanced = false
             ),
             FlowDto(
                 id = "demo_flow_2",
@@ -195,7 +241,8 @@ class FlowRepository(
                 triggerable = true,
                 enabled = true,
                 folder = "demo_folder_automations",
-                folderName = automationsFolder
+                folderName = automationsFolder,
+                isAdvanced = false
             ),
             FlowDto(
                 id = "demo_flow_3",
@@ -203,7 +250,8 @@ class FlowRepository(
                 triggerable = true,
                 enabled = true,
                 folder = "demo_folder_security",
-                folderName = securityFolder
+                folderName = securityFolder,
+                isAdvanced = true
             ),
             FlowDto(
                 id = "demo_flow_4",
@@ -211,7 +259,8 @@ class FlowRepository(
                 triggerable = true,
                 enabled = true,
                 folder = "demo_folder_security",
-                folderName = securityFolder
+                folderName = securityFolder,
+                isAdvanced = true
             )
         )
     }

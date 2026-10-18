@@ -47,6 +47,14 @@
     <!-- Flows Screen -->
     <string name="flows_title">Automazioni</string>
     <string name="flows_empty">Nessun flow avviabile manualmente trovato su questo Homey.</string>
+    <string name="flows_btn_refresh">Aggiorna Flow</string>
+    <string name="flows_folder_general">Generali</string>
+    <string name="flow_badge_advanced">ADV</string>
+    <string name="flow_badge_advanced_desc">Flow avanzato</string>
+    <string name="flow_triggering">Avvio flow...</string>
+    <string name="flow_success">Flow avviato con successo</string>
+    <string name="flow_error">Errore avvio flow</string>
+    <string name="flows_icon_desc">Icona flow</string>
 
     <!-- Settings Screen -->
     <string name="settings_title">Impostazioni</string>
@@ -103,6 +111,7 @@
     <string name="repo_success_flow">Flow avviato con successo</string>
     <string name="repo_error_flow_http">Errore Flow: HTTP %d</string>
     <string name="repo_error_flow_trigger_http">Errore HTTP %d: impossibile avviare il Flow</string>
+    <string name="repo_error_flow_homeyscript_missing">L\'avvio richiede che l\'app HomeyScript sia installata su Homey.</string>
     <string name="repo_error_dashboards_http">Errore dashboard: HTTP %d</string>
 
     <!-- Device Detail Multi-Tab & History -->

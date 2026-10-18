@@ -49,6 +49,14 @@
     <!-- Flows Screen -->
     <string name="flows_title">Automations</string>
     <string name="flows_empty">No triggerable flows found on this Homey.</string>
+    <string name="flows_btn_refresh">Refresh Flows</string>
+    <string name="flows_folder_general">General</string>
+    <string name="flow_badge_advanced">ADV</string>
+    <string name="flow_badge_advanced_desc">Advanced Flow</string>
+    <string name="flow_triggering">Triggering flow...</string>
+    <string name="flow_success">Flow executed</string>
+    <string name="flow_error">Flow execution failed</string>
+    <string name="flows_icon_desc">Flow icon</string>
 
     <!-- Settings Screen -->
     <string name="settings_title">Settings</string>
@@ -116,6 +124,7 @@
     <string name="repo_success_flow">Flow triggered successfully</string>
     <string name="repo_error_flow_http">Flow error: HTTP %d</string>
     <string name="repo_error_flow_trigger_http">HTTP Error %d: unable to trigger flow</string>
+    <string name="repo_error_flow_homeyscript_missing">Execution requires HomeyScript to be installed on Homey.</string>
     <string name="repo_error_dashboards_http">Dashboard error: HTTP %d</string>
     <string name="demo_folder_automations">Automations</string>
     <string name="demo_folder_security">Security</string>

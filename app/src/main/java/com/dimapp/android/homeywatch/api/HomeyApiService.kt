@@ -4,6 +4,8 @@ import com.dimapp.android.homeywatch.api.models.DashboardDto
 import com.dimapp.android.homeywatch.api.models.DeviceDto
 import com.dimapp.android.homeywatch.api.models.FlowDto
 import com.dimapp.android.homeywatch.api.models.FlowFolderDto
+import com.dimapp.android.homeywatch.api.models.FlowTriggerRequestDto
+import com.dimapp.android.homeywatch.api.models.FlowTriggerResponseDto
 import com.google.gson.JsonElement
 import com.dimapp.android.homeywatch.api.models.InsightLogDto
 import com.dimapp.android.homeywatch.api.models.SetCapabilityBody
@@ -61,7 +63,16 @@ interface HomeyApiService {
     suspend fun getFlows(): Response<Map<String, FlowDto>>
 
     /**
-     * Triggers a Homey standard Flow by its UUID.
+     * Retrieves all Advanced Flows defined in Homey.
+     *
+     * @public
+     * @return Map of flow ID -> [FlowDto], or an error [Response].
+     */
+    @GET("manager/flow/advancedflow")
+    suspend fun getAdvancedFlows(): Response<Map<String, FlowDto>>
+
+    /**
+     * Triggers a Homey standard Flow directly by its UUID.
      *
      * @public
      * @param flowId UUID of the flow to trigger.
@@ -73,6 +84,30 @@ interface HomeyApiService {
     ): Response<Unit>
 
     /**
+     * Triggers a Homey Advanced Flow directly by its UUID.
+     *
+     * @public
+     * @param flowId UUID of the advanced flow to trigger.
+     * @return Empty [Response] on success (HTTP 200).
+     */
+    @POST("manager/flow/advancedflow/{flowId}/trigger")
+    suspend fun triggerAdvancedFlow(
+        @Path("flowId") flowId: String
+    ): Response<Unit>
+
+    /**
+     * Triggers a Flow (Standard or Advanced) through the Wear OS companion HomeyScript proxy.
+     *
+     * @public
+     * @param body [FlowTriggerRequestDto] containing flowId, isAdvanced flag.
+     * @return [FlowTriggerResponseDto] wrapped in a Retrofit [Response].
+     */
+    @POST("app/com.dimapp.wearos/flow/trigger")
+    suspend fun triggerCompanionFlow(
+        @Body body: FlowTriggerRequestDto
+    ): Response<FlowTriggerResponseDto>
+
+    /**
      * Retrieves all flow folders defined in Homey.
      *
      * @public
@@ -80,6 +115,15 @@ interface HomeyApiService {
      */
     @GET("manager/flow/folder")
     suspend fun getFlowFolders(): Response<Map<String, FlowFolderDto>>
+
+    /**
+     * Retrieves all flow folders defined in Homey via alternate endpoint path.
+     *
+     * @public
+     * @return Map of folder ID -> [FlowFolderDto], or an error [Response].
+     */
+    @GET("manager/flow/flowfolder")
+    suspend fun getFlowFoldersAlt(): Response<Map<String, FlowFolderDto>>
 
     /**
      * Retrieves all zones (rooms) defined in Homey.
