@@ -52,46 +52,6 @@ object HomeyApiClient {
         return _buildOkHttpClient(authRepo, debug)
     }
 
-    /**
-     * Creates a new [HomeyApiService] dedicated to a specific hub with an explicit Bearer token.
-     *
-     * @public
-     * @param baseUrl Full base URL including trailing slash.
-     * @param sessionToken Session token for the target hub.
-     * @param debug Whether to enable logging.
-     * @return A ready-to-use [HomeyApiService].
-     */
-    fun createForHub(
-        baseUrl: String,
-        sessionToken: String,
-        debug: Boolean = false
-    ): HomeyApiService {
-        val client = OkHttpClient.Builder()
-            .connectTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .readTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .writeTimeout(TIMEOUT_SECONDS, TimeUnit.SECONDS)
-            .addInterceptor { chain ->
-                val original = chain.request()
-                val request = original.newBuilder()
-                    .header("Authorization", "Bearer $sessionToken")
-                    .build()
-                chain.proceed(request)
-            }
-
-        if (debug) {
-            client.addInterceptor(HttpLoggingInterceptor().apply {
-                level = HttpLoggingInterceptor.Level.BASIC
-            })
-        }
-
-        return Retrofit.Builder()
-            .baseUrl(baseUrl)
-            .client(client.build())
-            .addConverterFactory(GsonConverterFactory.create())
-            .build()
-            .create(HomeyApiService::class.java)
-    }
-
     // ── Private Methods ────────────────────────────────────────────────────────
 
     /**
@@ -110,9 +70,12 @@ object HomeyApiClient {
             .addInterceptor(TokenInjectorInterceptor(authRepo))
 
         if (debug) {
-            builder.addInterceptor(HttpLoggingInterceptor().apply {
+            val loggingInterceptor = HttpLoggingInterceptor(SanitizedHttpLogger("OkHttpClient")).apply {
                 level = HttpLoggingInterceptor.Level.BASIC
-            })
+                redactHeader("Authorization")
+                redactHeader("x-homey-id")
+            }
+            builder.addInterceptor(loggingInterceptor)
         }
 
         return builder.build()
@@ -123,6 +86,10 @@ object HomeyApiClient {
  * OkHttp [Interceptor] that automatically injects the OAuth2 Bearer token
  * into every outgoing request, refreshing it silently if expired.
  *
+ * For Companion App endpoints (`app/com.dimapp.wearos`), also attaches the raw session token
+ * as a `?token=` query parameter because Homey `ManagerApiLocal` does not forward HTTP headers
+ * to `api.js` handlers.
+ *
  * @property authRepo [HomeyAuthRepository] used to obtain a valid Bearer token.
  */
 class TokenInjectorInterceptor(
@@ -130,37 +97,60 @@ class TokenInjectorInterceptor(
 ) : Interceptor {
 
     /**
-     * Intercepts each request, injects the Bearer token, and retries once upon HTTP 401.
+     * Intercepts each request, injects the Bearer token (and `?token=` for companion endpoints),
+     * and retries once upon HTTP 401 after silent token rotation.
      *
      * @public
      * @param chain The OkHttp [Interceptor.Chain].
      * @return The [Response] from the upstream server.
      */
     override fun intercept(chain: Interceptor.Chain): Response {
-        val bearer = runBlocking { authRepo.getValidDelegationToken() }
+        val originalRequest = chain.request()
+        val hubId = if (originalRequest.url.host.contains(".connect.athom.com")) {
+            originalRequest.url.host.substringBefore(".connect.athom.com")
+        } else {
+            null
+        }
+
+        val bearer = runBlocking { authRepo.getValidDelegationToken(hubId) }
 
         val request = if (bearer != null) {
-            chain.request().newBuilder()
-                .header("Authorization", bearer)
-                .build()
+            val reqBuilder = originalRequest.newBuilder()
+            if (originalRequest.header("Authorization") == null) {
+                reqBuilder.header("Authorization", bearer)
+            }
+            if (originalRequest.url.encodedPath.contains("app/com.dimapp.wearos")) {
+                val rawToken = bearer.removePrefix("Bearer ").trim()
+                val urlWithToken = originalRequest.url.newBuilder()
+                    .setQueryParameter("token", rawToken)
+                    .build()
+                reqBuilder.url(urlWithToken)
+            }
+            reqBuilder.build()
         } else {
-            chain.request()
+            originalRequest
         }
 
         val response = chain.proceed(request)
 
         // If the Homey Hub returns 401 (token expired), attempt a silent refresh
         if (response.code == 401) {
-            val isRefreshed = runBlocking { authRepo.refreshHubSessionToken(bearer) }
+            val isRefreshed = runBlocking { authRepo.refreshHubSessionToken(bearer, hubId) }
             if (isRefreshed) {
-                val newBearer = runBlocking { authRepo.getValidDelegationToken() }
+                val newBearer = runBlocking { authRepo.getValidDelegationToken(hubId) }
                 if (newBearer != null) {
                     response.close()
 
-                    val newRequest = chain.request().newBuilder()
+                    val newReqBuilder = originalRequest.newBuilder()
                         .header("Authorization", newBearer)
-                        .build()
-                    return chain.proceed(newRequest)
+                    if (originalRequest.url.encodedPath.contains("app/com.dimapp.wearos")) {
+                        val newRawToken = newBearer.removePrefix("Bearer ").trim()
+                        val urlWithToken = originalRequest.url.newBuilder()
+                            .setQueryParameter("token", newRawToken)
+                            .build()
+                        newReqBuilder.url(urlWithToken)
+                    }
+                    return chain.proceed(newReqBuilder.build())
                 }
             }
         }

@@ -4,8 +4,6 @@ import com.dimapp.android.homeywatch.api.models.DashboardDto
 import com.dimapp.android.homeywatch.api.models.DeviceDto
 import com.dimapp.android.homeywatch.api.models.FlowDto
 import com.dimapp.android.homeywatch.api.models.FlowFolderDto
-import com.dimapp.android.homeywatch.api.models.FlowTriggerRequestDto
-import com.dimapp.android.homeywatch.api.models.FlowTriggerResponseDto
 import com.google.gson.JsonElement
 import com.dimapp.android.homeywatch.api.models.InsightLogDto
 import com.dimapp.android.homeywatch.api.models.SetCapabilityBody
@@ -96,34 +94,13 @@ interface HomeyApiService {
     ): Response<Unit>
 
     /**
-     * Triggers a Flow (Standard or Advanced) through the Wear OS companion HomeyScript proxy.
-     *
-     * @public
-     * @param body [FlowTriggerRequestDto] containing flowId, isAdvanced flag.
-     * @return [FlowTriggerResponseDto] wrapped in a Retrofit [Response].
-     */
-    @POST("app/com.dimapp.wearos/flow/trigger")
-    suspend fun triggerCompanionFlow(
-        @Body body: FlowTriggerRequestDto
-    ): Response<FlowTriggerResponseDto>
-
-    /**
      * Retrieves all flow folders defined in Homey.
      *
      * @public
      * @return Map of folder ID -> [FlowFolderDto], or an error [Response].
      */
-    @GET("manager/flow/folder")
-    suspend fun getFlowFolders(): Response<Map<String, FlowFolderDto>>
-
-    /**
-     * Retrieves all flow folders defined in Homey via alternate endpoint path.
-     *
-     * @public
-     * @return Map of folder ID -> [FlowFolderDto], or an error [Response].
-     */
     @GET("manager/flow/flowfolder")
-    suspend fun getFlowFoldersAlt(): Response<Map<String, FlowFolderDto>>
+    suspend fun getFlowFolders(): Response<Map<String, FlowFolderDto>>
 
     /**
      * Retrieves all zones (rooms) defined in Homey.
@@ -133,20 +110,6 @@ interface HomeyApiService {
      */
     @GET("manager/zones/zone")
     suspend fun getZones(): Response<Map<String, ZoneDto>>
-
-    /**
-     * Retrieves the current value object of a specific capability for a device.
-     *
-     * @public
-     * @param deviceId     UUID of the target device.
-     * @param capabilityId Capability identifier.
-     * @return A map containing the capability properties, e.g. `{"value": true}`.
-     */
-    @GET("manager/devices/device/{deviceId}/capability/{capabilityId}")
-    suspend fun getCapabilityObject(
-        @Path("deviceId")     deviceId: String,
-        @Path("capabilityId") capabilityId: String
-    ): Response<Any>
 
     /**
      * Retrieves the current user profile, including favorite devices.

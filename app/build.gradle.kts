@@ -10,9 +10,10 @@ android {
     defaultConfig {
         applicationId = "com.dimapp.android.homeywatch"
         minSdk = 30
-        targetSdk = 36
-        versionCode = 12
-        versionName = "1.2.2"
+        // Target API 35 required by Google Play for Wear OS (requires wear-tiles 1.5.0+ for API 34 update compatibility)
+        targetSdk = 35
+        versionCode = 17
+        versionName = "1.3.0"
     }
 
     buildTypes {
@@ -24,6 +25,9 @@ android {
                 "proguard-rules.pro"
             )
             signingConfig = signingConfigs.getByName("debug")
+            ndk {
+                debugSymbolLevel = "FULL"
+            }
         }
         debug {
             applicationIdSuffix = ".debug"

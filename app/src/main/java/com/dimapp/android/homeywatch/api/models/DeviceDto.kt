@@ -85,6 +85,10 @@ data class IconObjDto(
  * @property setable Whether this capability supports write operations.
  * @property uiQuickAction Whether this capability is explicitly marked as a quick action in Homey.
  * @property uiComponent UI component type used in Homey (e.g. "button", "toggle").
+ * @property insightsTitleTrue Localized title shown in Homey Timeline when a boolean value is `true`.
+ * @property insightsTitleFalse Localized title shown in Homey Timeline when a boolean value is `false`.
+ * @property titleTrue Localized sensor/UI label when a boolean value is `true`.
+ * @property titleFalse Localized sensor/UI label when a boolean value is `false`.
  */
 data class CapabilityDto(
     @SerializedName("value") val value: Any?,
@@ -92,7 +96,11 @@ data class CapabilityDto(
     @SerializedName("title") val title: Any?,
     @SerializedName("setable") val setable: Boolean?,
     @SerializedName("uiQuickAction") val uiQuickAction: Boolean? = null,
-    @SerializedName("uiComponent") val uiComponent: String? = null
+    @SerializedName("uiComponent") val uiComponent: String? = null,
+    @SerializedName("insightsTitleTrue") val insightsTitleTrue: Any? = null,
+    @SerializedName("insightsTitleFalse") val insightsTitleFalse: Any? = null,
+    @SerializedName("titleTrue") val titleTrue: Any? = null,
+    @SerializedName("titleFalse") val titleFalse: Any? = null
 )
 
 /**

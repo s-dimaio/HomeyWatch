@@ -100,7 +100,7 @@ class MainActivity : ComponentActivity() {
                                     deviceRepo.invalidateCache()
                                     flowRepo.invalidateCache()
                                     dashboardRepo.invalidateCache()
-                                    com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlots(this@MainActivity)
+                                    com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlotsAsync(this@MainActivity)
                                     currentScreen = AppScreen.MAIN
                                 },
                                 onCancel = if (isAlreadyAuth) {
@@ -132,6 +132,7 @@ class MainActivity : ComponentActivity() {
                                 currentScreen = AppScreen.DEVICE_DETAIL
                             },
                             onNavigateAddHub = { currentScreen = AppScreen.SETUP },
+                            onNavigateReauth = { currentScreen = AppScreen.SETUP },
                             onLoggedOut = {
                                 deviceRepo.invalidateCache()
                                 flowRepo.invalidateCache()
@@ -167,15 +168,6 @@ class MainActivity : ComponentActivity() {
                                                 deviceId = selectedDetailDevice!!.id,
                                                 capabilityId = capabilityId,
                                                 value = value
-                                            )
-                                        }
-                                    },
-                                    onSetDim = { dimValue ->
-                                        coroutineScope.launch {
-                                            deviceRepo.setDeviceCapabilityValue(
-                                                deviceId = selectedDetailDevice!!.id,
-                                                capabilityId = CAP_DIM,
-                                                value = dimValue
                                             )
                                         }
                                     },

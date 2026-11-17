@@ -7,6 +7,10 @@ import android.util.Log
 import androidx.wear.tiles.TileService
 import com.dimapp.android.homeywatch.R
 import com.dimapp.android.homeywatch.core.DependencyManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Data holder representing a configured Homey hub.
@@ -33,6 +37,26 @@ object TileSlotManager {
 
     private const val TAG = "TileSlotManager"
     const val MAX_SLOTS = 4
+    private val _syncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile
+    private var _lastSyncedSignature: String? = null
+
+    /**
+     * Launches [syncSlots] asynchronously on a background IO dispatcher so startup paths
+     * do not perform `EncryptedSharedPreferences` reads or `PackageManager` IPC on the main thread.
+     *
+     * @public
+     * @param context Application context.
+     * @example
+     * TileSlotManager.syncSlotsAsync(context)
+     */
+    fun syncSlotsAsync(context: Context) {
+        val appCtx = context.applicationContext
+        _syncScope.launch {
+            syncSlots(appCtx)
+        }
+    }
 
     /**
      * Returns the [TileService] class corresponding to the given 1-based slot number.
@@ -62,6 +86,7 @@ object TileSlotManager {
      * @example
      * TileSlotManager.syncSlots(context)
      */
+    @Synchronized
     fun syncSlots(context: Context) {
         val appCtx = context.applicationContext
         val storage = DependencyManager.getTokenStorage(appCtx)
@@ -88,6 +113,11 @@ object TileSlotManager {
             }
         }
 
+        val signature = hubs.joinToString("|") { "${it.id}:${it.name}" }
+        if (signature == _lastSyncedSignature) {
+            return
+        }
+
         Log.i(TAG, "[TileSlotManager:syncSlots] Synchronizing Tile slots for ${hubs.size} hub(s).")
 
         for (slot in 1..MAX_SLOTS) {
@@ -96,27 +126,38 @@ object TileSlotManager {
             val targetHub = hubs.getOrNull(slot - 1)
 
             if (targetHub != null) {
+                val previousHubId = storage.getTileSlotHubId(slot)
+                val previousHubName = storage.getTileSlotHubName(slot)
+                val isAssignmentChanged = (previousHubId != targetHub.id || previousHubName != targetHub.name)
+
                 // Assign hub to this slot
                 storage.setTileSlotHub(slot, targetHub.id, targetHub.name)
 
-                // Enable service in PackageManager
+                // Enable service in PackageManager if not already enabled
                 val currentState = packageManager.getComponentEnabledSetting(componentName)
-                if (currentState != PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
+                val stateChanged = if (currentState != PackageManager.COMPONENT_ENABLED_STATE_ENABLED) {
                     packageManager.setComponentEnabledSetting(
                         componentName,
                         PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
                         PackageManager.DONT_KILL_APP
                     )
                     Log.d(TAG, "[TileSlotManager:syncSlots] Enabled slot $slot for hub: ${targetHub.name}")
+                    true
+                } else {
+                    false
                 }
 
-                // Force Tile update
-                try {
-                    TileService.getUpdater(appCtx).requestUpdate(serviceClass)
-                } catch (e: Exception) {
-                    Log.w(TAG, "[TileSlotManager:syncSlots] Could not request update for slot $slot: ${e.message}")
+                // Force Tile update only if assignment or component state changed (avoids startup request loop)
+                if (isAssignmentChanged || stateChanged) {
+                    try {
+                        TileService.getUpdater(appCtx).requestUpdate(serviceClass)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[TileSlotManager:syncSlots] Could not request update for slot $slot: ${e.message}")
+                    }
                 }
             } else {
+                val hadPreviousAssignment = !storage.getTileSlotHubId(slot).isNullOrBlank()
+
                 // Clear assignment
                 storage.clearTileSlot(slot)
 
@@ -133,14 +174,17 @@ object TileSlotManager {
                     }
                 } else {
                     // Slot 1 remains enabled (may show unconfigured/login state if no hubs)
-                    try {
-                        TileService.getUpdater(appCtx).requestUpdate(serviceClass)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "[TileSlotManager:syncSlots] Could not request update for slot 1: ${e.message}")
+                    if (hadPreviousAssignment) {
+                        try {
+                            TileService.getUpdater(appCtx).requestUpdate(serviceClass)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "[TileSlotManager:syncSlots] Could not request update for slot 1: ${e.message}")
+                        }
                     }
                 }
             }
         }
+        _lastSyncedSignature = signature
     }
 
     /**

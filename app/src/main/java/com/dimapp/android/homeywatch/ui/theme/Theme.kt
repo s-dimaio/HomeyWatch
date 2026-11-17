@@ -4,7 +4,7 @@ import androidx.compose.runtime.Composable
 import androidx.wear.compose.material.Colors
 import androidx.wear.compose.material.MaterialTheme
 
-private val HomeyColorPalette = Colors(
+private val _HomeyColorPalette = Colors(
     primary = HomeyBlue,
     primaryVariant = HomeyBlueDark,
     secondary = HomeyLightActive,
@@ -16,12 +16,24 @@ private val HomeyColorPalette = Colors(
     onSurface = TextPrimary
 )
 
+/**
+ * Root Wear OS Material theme wrapper for HomeyWatch using AMOLED-friendly colors and typography.
+ *
+ * @public
+ * @param content Composable UI tree rendered within the theme.
+ * @example
+ * ```kotlin
+ * HomeyWatchTheme {
+ *     MainScreen()
+ * }
+ * ```
+ */
 @Composable
 fun HomeyWatchTheme(
     content: @Composable () -> Unit
 ) {
     MaterialTheme(
-        colors = HomeyColorPalette,
+        colors = _HomeyColorPalette,
         typography = HomeyTypography,
         content = content
     )

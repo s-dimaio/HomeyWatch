@@ -53,11 +53,12 @@ import com.dimapp.android.homeywatch.ui.theme.TextSecondary
 /**
  * Data holder for resolved Quick Action button styling.
  *
+ * @private
  * @property iconRes Drawable resource ID for the quick action icon.
  * @property circleBgColor Background color of the quick action circular button.
  * @property iconTintColor Tint color applied to the quick action icon.
  */
-private data class QuickActionStyle(
+private data class _QuickActionStyle(
     val iconRes: Int,
     val circleBgColor: Color,
     val iconTintColor: Color
@@ -160,7 +161,7 @@ private fun _DeviceStandardChip(
 
                 Icon(
                     painter = iconPainter,
-                    contentDescription = device.name,
+                    contentDescription = device.displayName,
                     tint = if (device.isAvailable) Color.White else Color.Gray,
                     modifier = Modifier.size(20.dp)
                 )
@@ -168,7 +169,7 @@ private fun _DeviceStandardChip(
         },
         label = {
             Text(
-                text = device.name,
+                text = device.displayName,
                 style = MaterialTheme.typography.button,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
@@ -262,7 +263,7 @@ private fun _DeviceSplitToggleChip(
 
                     Icon(
                         painter = iconPainter,
-                        contentDescription = device.name,
+                        contentDescription = device.displayName,
                         tint = if (device.isAvailable) Color.White else Color.Gray,
                         modifier = Modifier.size(20.dp)
                     )
@@ -276,7 +277,7 @@ private fun _DeviceSplitToggleChip(
                     verticalArrangement = Arrangement.Center
                 ) {
                     Text(
-                        text = device.name,
+                        text = device.displayName,
                         style = MaterialTheme.typography.button,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -302,7 +303,7 @@ private fun _DeviceSplitToggleChip(
                 } else {
                     Icon(
                         painter = painterResource(id = quickActionStyle.iconRes),
-                        contentDescription = device.name,
+                        contentDescription = device.displayName,
                         tint = quickActionStyle.iconTintColor,
                         modifier = Modifier.size(20.dp)
                     )
@@ -359,9 +360,9 @@ private fun _DeviceSecondaryLabel(
  *
  * @private
  * @param device Target [HomeyDevice].
- * @return [QuickActionStyle] containing the resolved icon, background color, and tint color.
+ * @return [_QuickActionStyle] containing the resolved icon, background color, and tint color.
  */
-private fun _resolveQuickActionStyle(device: HomeyDevice): QuickActionStyle {
+private fun _resolveQuickActionStyle(device: HomeyDevice): _QuickActionStyle {
     val qaCap = device.quickActionCapability ?: device.primaryCapability
     val isQaActive = device.isQuickActionActive
 
@@ -369,13 +370,13 @@ private fun _resolveQuickActionStyle(device: HomeyDevice): QuickActionStyle {
         // 1. Lights and Plugs (onoff capability)
         device.isLight || qaCap == "onoff" -> {
             if (isQaActive) {
-                QuickActionStyle(
+                _QuickActionStyle(
                     iconRes = R.drawable.ic_homey_power,
                     circleBgColor = HomeyLightActiveBgDark,
                     iconTintColor = HomeyLightActiveIcon
                 )
             } else {
-                QuickActionStyle(
+                _QuickActionStyle(
                     iconRes = R.drawable.ic_homey_power,
                     circleBgColor = HomeyLightInactiveBgDark,
                     iconTintColor = HomeyLightInactiveIconDark
@@ -386,13 +387,13 @@ private fun _resolveQuickActionStyle(device: HomeyDevice): QuickActionStyle {
         device.deviceClass == "lock" || qaCap == "locked" -> {
             val isLocked = !isQaActive
             if (isLocked) {
-                QuickActionStyle(
+                _QuickActionStyle(
                     iconRes = R.drawable.ic_homey_door_locked,
                     circleBgColor = HomeyLockLockedBgDark,
                     iconTintColor = HomeyLockLockedIcon
                 )
             } else {
-                QuickActionStyle(
+                _QuickActionStyle(
                     iconRes = R.drawable.ic_homey_door_unlocked,
                     circleBgColor = HomeyLockUnlockedBgDark,
                     iconTintColor = HomeyLockUnlockedIconDark
@@ -401,7 +402,7 @@ private fun _resolveQuickActionStyle(device: HomeyDevice): QuickActionStyle {
         }
         // 2b. Momentary unlatch actions (button.unlatch, unlatch)
         qaCap == "unlatch" || qaCap.startsWith("unlatch.") || qaCap == "button.unlatch" -> {
-            QuickActionStyle(
+            _QuickActionStyle(
                 iconRes = R.drawable.ic_homey_door_unlocked,
                 circleBgColor = HomeyLockUnlockedBgDark,
                 iconTintColor = HomeyLockUnlockedIconDark
@@ -411,13 +412,13 @@ private fun _resolveQuickActionStyle(device: HomeyDevice): QuickActionStyle {
         device.deviceClass == "garagedoor" || qaCap == "garagedoor_closed" -> {
             val isClosed = !isQaActive
             if (isClosed) {
-                QuickActionStyle(
+                _QuickActionStyle(
                     iconRes = R.drawable.ic_homey_garage_close,
                     circleBgColor = HomeyLockLockedBgDark,
                     iconTintColor = HomeyLockLockedIcon
                 )
             } else {
-                QuickActionStyle(
+                _QuickActionStyle(
                     iconRes = R.drawable.ic_homey_garage_open,
                     circleBgColor = HomeyLockUnlockedBgDark,
                     iconTintColor = HomeyLockUnlockedIconDark
@@ -426,7 +427,7 @@ private fun _resolveQuickActionStyle(device: HomeyDevice): QuickActionStyle {
         }
         // 4. Other categories, scene triggers, and uncategorized push buttons
         else -> {
-            QuickActionStyle(
+            _QuickActionStyle(
                 iconRes = R.drawable.ic_homey_general_button,
                 circleBgColor = HomeyLightInactiveBgDark,
                 iconTintColor = if (isQaActive) HomeyBlue else HomeyLightInactiveIconDark

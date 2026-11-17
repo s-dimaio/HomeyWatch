@@ -42,3 +42,4 @@ scratch/
 release.ps1
 *.code-workspace
 AI_PROJECT_HANDBOOK.md
+/log/

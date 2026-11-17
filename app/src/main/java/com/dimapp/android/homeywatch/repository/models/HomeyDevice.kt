@@ -84,6 +84,7 @@ const val CAP_THERMOSTAT_MODE = "thermostat_mode"
  * @property lightTemperature Color temperature between 0.0 and 1.0.
  * @property rawCapabilities Map of capability ID to raw value received from the Homey API.
  * @property customName Optional custom display name configured by the user in companion app.
+ * @property favoriteOrder Order index in the user's Homey `favoriteDevices` list (`Int.MAX_VALUE` if not a favorite).
  */
 data class HomeyDevice(
     val id: String,
@@ -116,7 +117,8 @@ data class HomeyDevice(
     val rawCapabilities: Map<String, Any?> = emptyMap(),
     val customName: String? = null,
     val quickActionCapability: String? = null,
-    val capabilitiesMetadata: Map<String, CapabilityMeta> = emptyMap()
+    val capabilitiesMetadata: Map<String, CapabilityMeta> = emptyMap(),
+    val favoriteOrder: Int = Int.MAX_VALUE
 ) {
     /**
      * Display label for this device, favoring the custom label if configured.
@@ -166,13 +168,21 @@ data class HomeyDevice(
  * @property title Human-readable localized title if available.
  * @property setable Whether the capability accepts mutations.
  * @property uiComponent Preferred UI component template (e.g. "slider", "toggle", "sensor").
+ * @property insightsTitleTrue Localized timeline label when a boolean value is `true`.
+ * @property insightsTitleFalse Localized timeline label when a boolean value is `false`.
+ * @property titleTrue Localized sensor label when a boolean value is `true`.
+ * @property titleFalse Localized sensor label when a boolean value is `false`.
  */
 data class CapabilityMeta(
     val id: String,
     val type: String? = null,
     val title: String? = null,
     val setable: Boolean = true,
-    val uiComponent: String? = null
+    val uiComponent: String? = null,
+    val insightsTitleTrue: String? = null,
+    val insightsTitleFalse: String? = null,
+    val titleTrue: String? = null,
+    val titleFalse: String? = null
 )
 
 /**
@@ -255,8 +265,9 @@ fun isButtonOrActionCapability(capabilityId: String?): Boolean {
  */
 fun isCapabilityActive(capabilityId: String, rawValue: Any?): Boolean {
     if (isButtonOrActionCapability(capabilityId)) return false
+    val baseCap = capabilityId.substringBefore(".")
     val boolVal = rawValue as? Boolean
-    return when (capabilityId) {
+    return when (baseCap) {
         CAP_GARAGEDOOR           -> boolVal == false
         "locked"                 -> boolVal == false
         "windowcoverings_closed" -> boolVal == false

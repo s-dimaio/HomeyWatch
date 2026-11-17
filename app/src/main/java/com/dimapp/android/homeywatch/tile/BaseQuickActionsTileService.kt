@@ -1,6 +1,11 @@
 package com.dimapp.android.homeywatch.tile
 
 import android.content.Context
+import android.os.Build
+import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.Log
 import androidx.wear.protolayout.ActionBuilders
 import androidx.wear.protolayout.ColorBuilders.argb
@@ -12,7 +17,6 @@ import androidx.wear.protolayout.ResourceBuilders
 import androidx.wear.protolayout.TimelineBuilders
 import androidx.wear.protolayout.material.Button
 import androidx.wear.protolayout.material.ButtonColors
-import androidx.wear.protolayout.material.ButtonDefaults
 import androidx.wear.protolayout.material.CompactChip
 import androidx.wear.protolayout.material.Text
 import androidx.wear.protolayout.material.Typography
@@ -21,33 +25,49 @@ import androidx.wear.tiles.TileBuilders
 import androidx.wear.tiles.TileService
 import com.dimapp.android.homeywatch.MainActivity
 import com.dimapp.android.homeywatch.R
+import com.dimapp.android.homeywatch.api.SanitizedHttpLogger
 import com.dimapp.android.homeywatch.core.DependencyManager
 import com.dimapp.android.homeywatch.repository.models.CAP_ONOFF
 import com.dimapp.android.homeywatch.repository.models.CAP_TARGET_TEMPERATURE
 import com.dimapp.android.homeywatch.repository.models.HomeyDevice
 import com.dimapp.android.homeywatch.repository.models.HomeyResult
+import com.dimapp.android.homeywatch.storage.TokenStorage
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.guava.future
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicLong
 
-private const val ID_IC_HOMEY_LOGO = "tile_ic_homey_logo"
-private const val ID_IC_LIGHT = "tile_ic_light"
-private const val ID_IC_LOCK = "tile_ic_lock"
-private const val ID_IC_GARAGE = "tile_ic_garage"
-private const val ID_IC_THERMOSTAT = "tile_ic_thermostat"
-private const val ID_IC_DEFAULT = "tile_ic_default"
+private const val _ID_IC_HOMEY_LOGO = "tile_ic_homey_logo"
+private const val _ID_IC_LIGHT = "tile_ic_light"
+private const val _ID_IC_LOCK = "tile_ic_lock"
+private const val _ID_IC_GARAGE = "tile_ic_garage"
+private const val _ID_IC_THERMOSTAT = "tile_ic_thermostat"
+private const val _ID_IC_DEFAULT = "tile_ic_default"
 private const val _TAG = "BaseQuickActionsTile"
 
-/** Cooldown tracker for background sync: slotNumber -> lastSyncEpochMillis */
-private val _lastSyncTimestamps = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+private const val _COLOR_BUTTON_NEUTRAL = 0xFF2C2C2E.toInt()
+private const val _COLOR_BUTTON_EMPTY_BG = 0xFF1C1C1E.toInt()
+private const val _COLOR_BUTTON_EMPTY_FG = 0xFF555555.toInt()
+private const val _COLOR_ICON_WHITE = 0xFFFFFFFF.toInt()
+private const val _COLOR_LABEL_TEXT = 0xFFCCCCCC.toInt()
+
+/** Monotonic counter combined with boot-elapsed seed to guarantee unique anti-replay click nonces. */
+private val _clickNonceCounter = AtomicLong(SystemClock.elapsedRealtime())
+
+/** Dedicated coroutine scope for TileService asynchronous operations. */
+private val _tileSyncScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
 /**
- * Base TileService rendering a 2x2 glanceable quick actions grid for a dedicated Homey hub slot.
+ * Base [TileService] rendering a stateless 2x2 quick-switch grid for a dedicated Homey hub slot.
  *
- * Header contains the official Homey circular logo alongside the dynamic name of the configured hub.
+ * Buttons maintain a uniform neutral appearance without displaying live device state, eliminating
+ * background polling (`freshnessIntervalMillis = 0L`). When a switch button is tapped, the live
+ * state of that single device is read on demand and toggled to its opposite value, followed by
+ * tactile haptic confirmation.
  *
  * @property slotNumber 1-based slot index (1..4) managed by [TileSlotManager].
  */
@@ -55,264 +75,107 @@ abstract class BaseQuickActionsTileService(
     protected val slotNumber: Int
 ) : TileService() {
 
-    private val serviceScope = CoroutineScope(Dispatchers.IO)
+    private val _serviceScope: CoroutineScope
+        get() = _tileSyncScope
 
+    /**
+     * Handles Wear OS Tile layout requests and stateless quick-switch button actuations.
+     *
+     * @public
+     * @param requestParams System request parameters including optional `lastClickableId`.
+     * @return [ListenableFuture] resolving to the rendered [TileBuilders.Tile] with zero periodic freshness.
+     * @example
+     * // Invoked by the Wear OS Tile host when rendering or tapping a Tile button.
+     */
     override fun onTileRequest(requestParams: RequestBuilders.TileRequest): ListenableFuture<TileBuilders.Tile> {
-        return serviceScope.future {
+        return _serviceScope.future {
             val appCtx = applicationContext
             val storage = DependencyManager.getTokenStorage(appCtx)
-            val deviceRepo = DependencyManager.getDeviceRepository(appCtx)
-            val dashboardRepo = DependencyManager.getDashboardRepository(appCtx)
 
-            // Resolve target hub for this slot
-            var targetHubId = storage.getTileSlotHubId(slotNumber)
-            var targetHubName = storage.getTileSlotHubName(slotNumber)
-
-            // Fallback for slot 1 or slot 2 if no slot record exists yet
-            if (targetHubId == null && slotNumber == 1) {
-                if (storage.isDemoMode()) {
-                    targetHubId = "demo"
-                    targetHubName = appCtx.getString(R.string.demo_hub_title)
-                } else {
-                    targetHubId = storage.getSelectedHomeyId()
-                    targetHubName = storage.getSelectedHomeyName() ?: "Homey"
-                }
-            } else if (targetHubId == null && slotNumber == 2 && storage.isDemoMode()) {
-                targetHubId = "demo_2"
-                targetHubName = appCtx.getString(R.string.demo_hub_2_title)
-            }
-
-            // Handle in-place toggle if triggered by a LoadAction on this Tile
+            val (targetHubId, displayName) = _resolveSlotHub(storage, appCtx)
             val clickedId = requestParams.currentState?.lastClickableId
-            Log.d(_TAG, "[BaseQuickActionsTileService:onTileRequest] Slot $slotNumber onTileRequest, lastClickableId=$clickedId, targetHubId=$targetHubId")
+            Log.d(_TAG, "[BaseQuickActionsTileService:onTileRequest] Slot $slotNumber request, hasClick=${!clickedId.isNullOrBlank()}, targetHubId=${SanitizedHttpLogger.maskId(targetHubId)}")
 
-            if (!clickedId.isNullOrBlank() && clickedId.startsWith("toggle|")) {
-                _lastSyncTimestamps[slotNumber] = 0L // Reset cooldown on explicit user toggle
-                val parts = clickedId.split("|")
-                if (parts.size >= 4) {
-                    val devId = parts[1]
-                    val capId = parts[2]
-                    val targetActive = parts[3].toBooleanStrictOrNull() ?: true
-                    val toggleHub = if (parts.size >= 5 && parts[4].isNotBlank()) parts[4] else targetHubId
-
-                    Log.d(_TAG, "[BaseQuickActionsTileService:onTileRequest] Slot $slotNumber executing toggle: dev=$devId, cap=$capId, targetActive=$targetActive, hub=$toggleHub")
-                    val toggleRes = deviceRepo.toggleDeviceState(
-                        deviceId = devId,
-                        capabilityId = capId,
-                        makeActive = targetActive,
-                        hubId = toggleHub
-                    )
-                    Log.d(_TAG, "[BaseQuickActionsTileService:onTileRequest] Slot $slotNumber toggle result: $toggleRes")
-                }
+            if (!clickedId.isNullOrBlank() && TileSnapshotStore.markClickConsumedIfNew(appCtx, clickedId)) {
+                _handleButtonClick(appCtx, clickedId, targetHubId)
             }
 
             val deviceConfig = requestParams.deviceConfiguration
                 ?: DeviceParametersBuilders.DeviceParameters.Builder().build()
 
-            val syncIntervalSeconds = storage.getSyncInterval().coerceAtLeast(10)
-            val freshnessIntervalMillis = syncIntervalSeconds * 1000L
-
             if (targetHubId.isNullOrBlank()) {
-                // Unconfigured / empty slot
-                return@future _buildEmptyTile(appCtx, deviceConfig, "slot_${slotNumber}_empty", freshnessIntervalMillis)
+                return@future _buildEmptyTile(appCtx, deviceConfig, "slot_${slotNumber}_empty")
             }
 
-            val (quickDevices, displayName) = withTimeoutOrNull(2500L) {
-                val devicesResult = deviceRepo.getDevicesForHub(targetHubId, forceRefresh = false)
-                val allDevices = if (devicesResult is HomeyResult.Success) devicesResult.data else emptyList()
-                val devices = dashboardRepo.getQuickDevicesForHub(allDevices, targetHubId).take(4)
+            val tileDevices = _resolveOrInitializeTileDevices(appCtx, targetHubId, displayName)
+            _preloadMissingTileIcons(appCtx, tileDevices, targetHubId)
 
-                // Pre-load icon bytes for uncached devices asynchronously in a single batch without blocking onTileRequest
-                val uncachedDevs = devices.filter { !it.iconUrl.isNullOrBlank() && TileIconHelper.getCachedIconBytes(appCtx, it.iconUrl) == null }
-                if (uncachedDevs.isNotEmpty()) {
-                    serviceScope.launch {
-                        var anyLoaded = false
-                        for (dev in uncachedDevs) {
-                            val bytes = TileIconHelper.loadDeviceIconBytes(appCtx, dev.iconUrl)
-                            if (bytes != null) {
-                                anyLoaded = true
-                            }
-                        }
-                        if (anyLoaded) {
-                            try {
-                                TileService.getUpdater(appCtx).requestUpdate(TileSlotManager.getServiceClass(slotNumber))
-                            } catch (e: Exception) {
-                                Log.e(_TAG, "[BaseQuickActionsTileService:onTileRequest] Failed to request update after icon cache: ${e.message}")
-                            }
-                        }
-                    }
-                }
-
-                val name = targetHubName ?: if (targetHubId == "demo") {
-                    appCtx.getString(R.string.demo_hub_title)
-                } else if (targetHubId == "demo_2") {
-                    appCtx.getString(R.string.demo_hub_2_title)
-                } else {
-                    "Homey"
-                }
-
-                Pair(devices, name)
-            } ?: run {
-                Log.w(_TAG, "[BaseQuickActionsTileService:onTileRequest] Slot $slotNumber fetch timed out (2500ms limit), scheduling background update")
-                serviceScope.launch {
-                    val res = deviceRepo.getDevicesForHub(targetHubId, forceRefresh = false)
-                    if (res is HomeyResult.Success) {
-                        dashboardRepo.getQuickDevicesForHub(res.data, targetHubId)
-                    }
-                    try {
-                        TileService.getUpdater(appCtx).requestUpdate(TileSlotManager.getServiceClass(slotNumber))
-                    } catch (e: Exception) {
-                        Log.e(_TAG, "[BaseQuickActionsTileService:onTileRequest] Failed to request background update: ${e.message}")
-                    }
-                }
-                val fallbackName = targetHubName ?: "Homey"
-                Pair(emptyList<HomeyDevice>(), fallbackName)
+            val iconFingerprint = tileDevices.joinToString(";") { "${it.id}:${it.iconUrl}" }.hashCode().toString()
+            val nameFingerprint = tileDevices.joinToString(";") { "${it.id}:${it.displayName}" }.hashCode().toString()
+            val cachedIconsCount = tileDevices.count {
+                !it.iconUrl.isNullOrBlank() && TileIconHelper.getCachedIconBytes(appCtx, it.iconUrl) != null
             }
-
-            // Stale-While-Revalidate background state synchronization
-            val now = System.currentTimeMillis()
-            val lastSlotSync = _lastSyncTimestamps[slotNumber] ?: 0L
-            val lastGlobalSync = deviceRepo.getLastSyncTimestamp()
-            val effectiveLastSync = maxOf(lastSlotSync, lastGlobalSync)
-            if (now - effectiveLastSync >= freshnessIntervalMillis) {
-                _lastSyncTimestamps[slotNumber] = now
-                serviceScope.launch {
-                    val allRes = deviceRepo.getDevicesForHub(targetHubId, forceRefresh = false)
-                    val currentAll = if (allRes is HomeyResult.Success) allRes.data else emptyList()
-                    if (currentAll.isNotEmpty()) {
-                        val syncRes = deviceRepo.syncDeviceStates(currentAll, hubId = targetHubId)
-                        if (syncRes is HomeyResult.Success) {
-                            val updatedAll = syncRes.data
-                            val oldQuick = quickDevices
-                            val newQuick = dashboardRepo.getQuickDevicesForHub(updatedAll, targetHubId, forceRefresh = true).take(4)
-
-                            // Pre-load icon for any newly added or updated device
-                            newQuick.forEach { dev ->
-                                if (!dev.iconUrl.isNullOrBlank() && TileIconHelper.getCachedIconBytes(appCtx, dev.iconUrl) == null) {
-                                    TileIconHelper.loadDeviceIconBytes(appCtx, dev.iconUrl)
-                                }
-                            }
-
-                            val hasChanged = oldQuick.size != newQuick.size || oldQuick.zip(newQuick).any { (old, new) ->
-                                old.id != new.id ||
-                                old.isActive != new.isActive ||
-                                old.isAvailable != new.isAvailable ||
-                                old.dimValue != new.dimValue ||
-                                old.displayName != new.displayName ||
-                                old.primaryCapability != new.primaryCapability ||
-                                old.iconUrl != new.iconUrl
-                            }
-
-                            if (hasChanged) {
-                                Log.d(_TAG, "[BaseQuickActionsTileService:onTileRequest] Slot $slotNumber state/config changed via background sync, requesting tile update")
-                                try {
-                                    TileService.getUpdater(appCtx).requestUpdate(TileSlotManager.getServiceClass(slotNumber))
-                                } catch (e: Exception) {
-                                    Log.e(_TAG, "[BaseQuickActionsTileService:onTileRequest] Failed to request update after sync: ${e.message}")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            val iconFingerprint = quickDevices.joinToString(";") { "${it.id}:${it.iconUrl}" }.hashCode().toString()
-            val nameFingerprint = quickDevices.joinToString(";") { "${it.id}:${it.displayName}" }.hashCode().toString()
-            val cachedIconsCount = quickDevices.count { !it.iconUrl.isNullOrBlank() && TileIconHelper.getCachedIconBytes(appCtx, it.iconUrl) != null }
-            val resourcesVersion = "slot_${slotNumber}_${iconFingerprint}_${nameFingerprint}_${cachedIconsCount}_v2"
+            val resourcesVersion = "slot_${slotNumber}_${iconFingerprint}_${nameFingerprint}_${cachedIconsCount}_v3"
 
             _buildTile(
                 context = appCtx,
-                devices = quickDevices,
+                devices = tileDevices,
                 deviceParameters = deviceConfig,
                 hubId = targetHubId,
                 hubName = displayName,
-                resourcesVersion = resourcesVersion,
-                freshnessIntervalMillis = freshnessIntervalMillis
+                resourcesVersion = resourcesVersion
             )
         }
     }
 
+    /**
+     * Supplies static vector icons and cached inline device icons for the Tile.
+     *
+     * @public
+     * @param requestParams System resource request specifying the target `resourcesVersion`.
+     * @return [ListenableFuture] resolving to [ResourceBuilders.Resources].
+     * @example
+     * // Invoked by Wear OS SysUI when resourcesVersion changes.
+     */
     override fun onTileResourcesRequest(requestParams: RequestBuilders.ResourcesRequest): ListenableFuture<ResourceBuilders.Resources> {
-        return serviceScope.future {
+        return _serviceScope.future {
             val appCtx = applicationContext
             val storage = DependencyManager.getTokenStorage(appCtx)
-            val deviceRepo = DependencyManager.getDeviceRepository(appCtx)
-            val dashboardRepo = DependencyManager.getDashboardRepository(appCtx)
-
-            var targetHubId = storage.getTileSlotHubId(slotNumber)
-            if (targetHubId == null && slotNumber == 1) {
-                targetHubId = if (storage.isDemoMode()) "demo" else storage.getSelectedHomeyId()
-            } else if (targetHubId == null && slotNumber == 2 && storage.isDemoMode()) {
-                targetHubId = "demo_2"
-            }
+            val (targetHubId, displayName) = _resolveSlotHub(storage, appCtx)
 
             val resourcesBuilder = ResourceBuilders.Resources.Builder()
                 .setVersion(requestParams.version)
                 .addIdToImageMapping(
-                    ID_IC_HOMEY_LOGO,
-                    ResourceBuilders.ImageResource.Builder()
-                        .setAndroidResourceByResId(
-                            ResourceBuilders.AndroidImageResourceByResId.Builder()
-                                .setResourceId(R.mipmap.ic_launcher_foreground)
-                                .build()
-                        ).build()
+                    _ID_IC_HOMEY_LOGO,
+                    _drawableImageResource(R.drawable.ic_homey_tile_logo)
                 )
                 .addIdToImageMapping(
-                    ID_IC_LIGHT,
-                    ResourceBuilders.ImageResource.Builder()
-                        .setAndroidResourceByResId(
-                            ResourceBuilders.AndroidImageResourceByResId.Builder()
-                                .setResourceId(R.drawable.ic_light_on)
-                                .build()
-                        ).build()
+                    _ID_IC_LIGHT,
+                    _drawableImageResource(R.drawable.ic_light_on)
                 )
                 .addIdToImageMapping(
-                    ID_IC_LOCK,
-                    ResourceBuilders.ImageResource.Builder()
-                        .setAndroidResourceByResId(
-                            ResourceBuilders.AndroidImageResourceByResId.Builder()
-                                .setResourceId(R.drawable.ic_lock_closed)
-                                .build()
-                        ).build()
+                    _ID_IC_LOCK,
+                    _drawableImageResource(R.drawable.ic_lock_closed)
                 )
                 .addIdToImageMapping(
-                    ID_IC_GARAGE,
-                    ResourceBuilders.ImageResource.Builder()
-                        .setAndroidResourceByResId(
-                            ResourceBuilders.AndroidImageResourceByResId.Builder()
-                                .setResourceId(R.drawable.ic_garage_closed)
-                                .build()
-                        ).build()
+                    _ID_IC_GARAGE,
+                    _drawableImageResource(R.drawable.ic_garage_closed)
                 )
                 .addIdToImageMapping(
-                    ID_IC_THERMOSTAT,
-                    ResourceBuilders.ImageResource.Builder()
-                        .setAndroidResourceByResId(
-                            ResourceBuilders.AndroidImageResourceByResId.Builder()
-                                .setResourceId(R.drawable.ic_thermostat)
-                                .build()
-                        ).build()
+                    _ID_IC_THERMOSTAT,
+                    _drawableImageResource(R.drawable.ic_thermostat)
                 )
                 .addIdToImageMapping(
-                    ID_IC_DEFAULT,
-                    ResourceBuilders.ImageResource.Builder()
-                        .setAndroidResourceByResId(
-                            ResourceBuilders.AndroidImageResourceByResId.Builder()
-                                .setResourceId(R.drawable.ic_device_generic)
-                                .build()
-                        ).build()
+                    _ID_IC_DEFAULT,
+                    _drawableImageResource(R.drawable.ic_device_generic)
                 )
 
             if (!targetHubId.isNullOrBlank()) {
-                val devicesResult = deviceRepo.getDevicesForHub(targetHubId, forceRefresh = false)
-                val allDevices = if (devicesResult is HomeyResult.Success) devicesResult.data else emptyList()
-                val quickDevices = dashboardRepo.getQuickDevicesForHub(allDevices, targetHubId).take(4)
-
-                for (dev in quickDevices) {
+                val tileDevices = _resolveOrInitializeTileDevices(appCtx, targetHubId, displayName)
+                for (dev in tileDevices) {
                     if (!dev.iconUrl.isNullOrBlank()) {
                         val bytes = TileIconHelper.getCachedIconBytes(appCtx, dev.iconUrl)
-                            ?: TileIconHelper.loadDeviceIconBytes(appCtx, dev.iconUrl)
+                            ?: TileIconHelper.loadDeviceIconBytes(appCtx, dev.iconUrl, hubId = targetHubId)
                         if (bytes != null) {
                             val inline = ResourceBuilders.InlineImageResource.Builder()
                                 .setData(bytes)
@@ -336,15 +199,249 @@ abstract class BaseQuickActionsTileService(
     }
 
     /**
-     * Builds the unconfigured placeholder Tile layout.
+     * Resolves the Homey hub ID and display label assigned to this Tile slot.
      *
      * @private
+     * @param storage Persistent [TokenStorage].
+     * @param context Application context.
+     * @return Pair of `(hubId, displayName)` where `hubId` is null if unconfigured.
+     */
+    private fun _resolveSlotHub(storage: TokenStorage, context: Context): Pair<String?, String> {
+        var targetHubId = storage.getTileSlotHubId(slotNumber)
+        var targetHubName = storage.getTileSlotHubName(slotNumber)
+
+        if (targetHubId == null && slotNumber == 1) {
+            if (storage.isDemoMode()) {
+                targetHubId = "demo"
+                targetHubName = context.getString(R.string.demo_hub_title)
+            } else {
+                targetHubId = storage.getSelectedHomeyId()
+                targetHubName = storage.getSelectedHomeyName() ?: "Homey"
+            }
+        } else if (targetHubId == null && slotNumber == 2 && storage.isDemoMode()) {
+            targetHubId = "demo_2"
+            targetHubName = context.getString(R.string.demo_hub_2_title)
+        }
+
+        val displayName = targetHubName ?: when (targetHubId) {
+            "demo" -> context.getString(R.string.demo_hub_title)
+            "demo_2" -> context.getString(R.string.demo_hub_2_title)
+            else -> "Homey"
+        }
+        return Pair(targetHubId, displayName)
+    }
+
+    /**
+     * Processes a stateless button tap or legacy toggle click, executing read-before-toggle actuation
+     * and emitting haptic confirmation.
+     *
+     * @private
+     * @param context Application context.
+     * @param clickedId Consumed clickable ID string.
+     * @param defaultHubId Slot hub ID fallback when not encoded in the clickable ID.
+     */
+    private suspend fun _handleButtonClick(
+        context: Context,
+        clickedId: String,
+        defaultHubId: String?
+    ) {
+        val deviceRepo = DependencyManager.getDeviceRepository(context)
+        val parts = clickedId.split("|")
+
+        if (clickedId.startsWith("press|") && parts.size >= 6) {
+            val devId = parts[1]
+            val capId = parts[2]
+            val toggleHub = parts[3].ifBlank { defaultHubId }
+            val isButton = parts[4].toBooleanStrictOrNull() ?: false
+            val fallbackActive = parts[5].toBooleanStrictOrNull() ?: false
+
+            Log.d(_TAG, "[BaseQuickActionsTileService:_handleButtonClick] Slot $slotNumber pressing dev=${SanitizedHttpLogger.maskId(devId)}, cap=$capId, isButton=$isButton, hub=${SanitizedHttpLogger.maskId(toggleHub)}")
+            if (isButton) {
+                val res = deviceRepo.toggleDeviceState(
+                    deviceId = devId,
+                    capabilityId = capId,
+                    makeActive = true,
+                    hubId = toggleHub
+                )
+                _triggerHapticFeedback(context, isSuccess = res is HomeyResult.Success)
+            } else {
+                val res = deviceRepo.smartToggleDevice(
+                    deviceId = devId,
+                    capabilityId = capId,
+                    fallbackIsActive = fallbackActive,
+                    hubId = toggleHub
+                )
+                if (res is HomeyResult.Success && !toggleHub.isNullOrBlank()) {
+                    TileSnapshotStore.updateFallbackActive(context, toggleHub, devId, res.data)
+                }
+                _triggerHapticFeedback(context, isSuccess = res is HomeyResult.Success)
+            }
+        } else if (clickedId.startsWith("toggle|") && parts.size >= 4) {
+            // Backward compatibility for Tiles rendered before stateless upgrade
+            val devId = parts[1]
+            val capId = parts[2]
+            val targetActive = parts[3].toBooleanStrictOrNull() ?: true
+            val toggleHub = if (parts.size >= 5 && parts[4].isNotBlank()) parts[4] else defaultHubId
+
+            Log.d(_TAG, "[BaseQuickActionsTileService:_handleButtonClick] Slot $slotNumber legacy toggle dev=${SanitizedHttpLogger.maskId(devId)}, cap=$capId, hub=${SanitizedHttpLogger.maskId(toggleHub)}")
+            val res = deviceRepo.smartToggleDevice(
+                deviceId = devId,
+                capabilityId = capId,
+                fallbackIsActive = !targetActive,
+                hubId = toggleHub
+            )
+            if (res is HomeyResult.Success && !toggleHub.isNullOrBlank()) {
+                TileSnapshotStore.updateFallbackActive(context, toggleHub, devId, res.data)
+            }
+            _triggerHapticFeedback(context, isSuccess = res is HomeyResult.Success)
+        }
+    }
+
+    /**
+     * Loads quick-action devices for [hubId] from [TileSnapshotStore], falling back to a one-time
+     * network resolution and persisting the snapshot if none exists yet.
+     *
+     * @private
+     * @param context Application context.
+     * @param hubId Target Homey hub ID.
+     * @param hubName Display name of the hub.
+     * @return List of up to 4 [TileDeviceSnapshot] entries.
+     */
+    private suspend fun _resolveOrInitializeTileDevices(
+        context: Context,
+        hubId: String,
+        hubName: String
+    ): List<TileDeviceSnapshot> {
+        val existingSnapshot = TileSnapshotStore.getHubSnapshot(context, hubId)
+        if (existingSnapshot != null) {
+            return existingSnapshot.devices
+        }
+
+        val deviceRepo = DependencyManager.getDeviceRepository(context)
+        val dashboardRepo = DependencyManager.getDashboardRepository(context)
+
+        val fetchedDevices: List<HomeyDevice>? = withTimeoutOrNull(2500L) {
+            val devicesResult = deviceRepo.getDevicesForHub(hubId, forceRefresh = false)
+            val allDevices = if (devicesResult is HomeyResult.Success) devicesResult.data else return@withTimeoutOrNull null
+            dashboardRepo.getQuickDevicesForHub(allDevices, hubId).take(4)
+        }
+
+        if (fetchedDevices != null) {
+            TileSnapshotStore.saveHubSnapshotIfChanged(context, hubId, hubName, fetchedDevices)
+            return TileSnapshotStore.getHubSnapshot(context, hubId)?.devices ?: emptyList()
+        }
+
+        Log.w(_TAG, "[BaseQuickActionsTileService:_resolveOrInitializeTileDevices] Slot $slotNumber initial snapshot fetch timed out; scheduling one-shot background init")
+        _serviceScope.launch {
+            val res = deviceRepo.getDevicesForHub(hubId, forceRefresh = false)
+            if (res is HomeyResult.Success && res.data.isNotEmpty()) {
+                val quick = dashboardRepo.getQuickDevicesForHub(res.data, hubId).take(4)
+                val saved = TileSnapshotStore.saveHubSnapshotIfChanged(context, hubId, hubName, quick)
+                if (saved) {
+                    try {
+                        TileService.getUpdater(context).requestUpdate(TileSlotManager.getServiceClass(slotNumber))
+                    } catch (e: Exception) {
+                        Log.e(_TAG, "[BaseQuickActionsTileService:_resolveOrInitializeTileDevices] Failed to request update after init: ${e.message}")
+                    }
+                }
+            }
+        }
+        return emptyList()
+    }
+
+    /**
+     * Downloads any missing icons exclusively for the 4 devices rendered in this Tile.
+     *
+     * @private
+     * @param context Application context.
+     * @param devices Devices displayed in this Tile.
+     * @param hubId Target Homey hub ID for relative icon URL resolution.
+     */
+    private fun _preloadMissingTileIcons(
+        context: Context,
+        devices: List<TileDeviceSnapshot>,
+        hubId: String
+    ) {
+        val uncached = devices.filter {
+            !it.iconUrl.isNullOrBlank() && TileIconHelper.getCachedIconBytes(context, it.iconUrl) == null
+        }
+        if (uncached.isEmpty()) return
+
+        _serviceScope.launch {
+            var anyLoaded = false
+            for (dev in uncached) {
+                val bytes = TileIconHelper.loadDeviceIconBytes(context, dev.iconUrl, hubId = hubId)
+                if (bytes != null) {
+                    anyLoaded = true
+                }
+            }
+            if (anyLoaded) {
+                try {
+                    TileService.getUpdater(context).requestUpdate(TileSlotManager.getServiceClass(slotNumber))
+                } catch (e: Exception) {
+                    Log.e(_TAG, "[BaseQuickActionsTileService:_preloadMissingTileIcons] Failed to request update after icon cache: ${e.message}")
+                }
+            }
+        }
+    }
+
+    /**
+     * Triggers tactile haptic feedback on the watch after a Tile button actuation.
+     *
+     * @private
+     * @param context Application context.
+     * @param isSuccess True for a crisp confirmation click; false for a double pulse error cue.
+     */
+    private fun _triggerHapticFeedback(context: Context, isSuccess: Boolean) {
+        try {
+            val vibrator: Vibrator? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val manager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+                manager?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+            if (vibrator == null || !vibrator.hasVibrator()) return
+
+            if (isSuccess) {
+                vibrator.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_CLICK))
+            } else {
+                vibrator.vibrate(VibrationEffect.createWaveform(longArrayOf(0L, 55L, 80L, 55L), -1))
+            }
+        } catch (e: Exception) {
+            Log.w(_TAG, "[BaseQuickActionsTileService:_triggerHapticFeedback] Unable to vibrate: ${e.message}")
+        }
+    }
+
+    /**
+     * Creates a ProtoLayout [ResourceBuilders.ImageResource] from a local Android drawable ID.
+     *
+     * @private
+     * @param resId Drawable resource identifier.
+     * @return Configured [ResourceBuilders.ImageResource].
+     */
+    private fun _drawableImageResource(resId: Int): ResourceBuilders.ImageResource {
+        return ResourceBuilders.ImageResource.Builder()
+            .setAndroidResourceByResId(
+                ResourceBuilders.AndroidImageResourceByResId.Builder()
+                    .setResourceId(resId)
+                    .build()
+            ).build()
+    }
+
+    /**
+     * Builds the unconfigured placeholder Tile layout with zero periodic freshness.
+     *
+     * @private
+     * @param context Application context.
+     * @param deviceParameters Watch screen parameters.
+     * @param resourcesVersion Resource version tag.
+     * @return Rendered [TileBuilders.Tile].
      */
     private fun _buildEmptyTile(
         context: Context,
         deviceParameters: DeviceParametersBuilders.DeviceParameters,
-        resourcesVersion: String = "slot_${slotNumber}_empty",
-        freshnessIntervalMillis: Long = 30_000L
+        resourcesVersion: String = "slot_${slotNumber}_empty"
     ): TileBuilders.Tile {
         val openAppAction = ActionBuilders.LaunchAction.Builder()
             .setAndroidActivity(
@@ -373,23 +470,33 @@ abstract class BaseQuickActionsTileService(
         return TileBuilders.Tile.Builder()
             .setResourcesVersion(resourcesVersion)
             .setTileTimeline(timeline)
-            .setFreshnessIntervalMillis(freshnessIntervalMillis)
+            .setFreshnessIntervalMillis(0L)
             .build()
     }
 
     /**
-     * Builds the 2x2 grid layout inside a Wear OS Tile.
+     * Builds the stateless 2x2 quick-switch grid layout inside a Wear OS Tile.
+     *
+     * All toggle buttons render with a uniform neutral color so the Tile acts strictly as a
+     * stateless remote control without implying live on/off status, and sets `freshnessIntervalMillis`
+     * to `0L` to avoid background wakeups.
      *
      * @private
+     * @param context Application context.
+     * @param devices Up to 4 quick-action device snapshots.
+     * @param deviceParameters Watch screen parameters.
+     * @param hubId Target Homey hub ID.
+     * @param hubName Display hub name in header.
+     * @param resourcesVersion Resource fingerprint string.
+     * @return Rendered [TileBuilders.Tile].
      */
     private fun _buildTile(
         context: Context,
-        devices: List<HomeyDevice>,
+        devices: List<TileDeviceSnapshot>,
         deviceParameters: DeviceParametersBuilders.DeviceParameters,
         hubId: String,
         hubName: String,
-        resourcesVersion: String,
-        freshnessIntervalMillis: Long = 30_000L
+        resourcesVersion: String
     ): TileBuilders.Tile {
         val defaultOpenAppAction = ActionBuilders.LaunchAction.Builder()
             .setAndroidActivity(
@@ -403,7 +510,6 @@ abstract class BaseQuickActionsTileService(
         val rootColumn = LayoutElementBuilders.Column.Builder()
             .setHorizontalAlignment(LayoutElementBuilders.HORIZONTAL_ALIGN_CENTER)
 
-        // Header: Homey circular logo + Hub Name (clickable to open app for target hub)
         val headerRow = LayoutElementBuilders.Row.Builder()
             .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
             .setModifiers(
@@ -418,9 +524,9 @@ abstract class BaseQuickActionsTileService(
 
         headerRow.addContent(
             LayoutElementBuilders.Image.Builder()
-                .setResourceId(ID_IC_HOMEY_LOGO)
-                .setWidth(dp(16f))
-                .setHeight(dp(16f))
+                .setResourceId(_ID_IC_HOMEY_LOGO)
+                .setWidth(dp(18f))
+                .setHeight(dp(18f))
                 .build()
         )
 
@@ -429,7 +535,7 @@ abstract class BaseQuickActionsTileService(
         headerRow.addContent(
             Text.Builder(context, hubName)
                 .setTypography(Typography.TYPOGRAPHY_CAPTION1)
-                .setColor(argb(0xFFFFFFFF.toInt()))
+                .setColor(argb(_COLOR_ICON_WHITE))
                 .setMaxLines(1)
                 .build()
         )
@@ -447,10 +553,9 @@ abstract class BaseQuickActionsTileService(
                 ).build()
             )
         } else {
-            // Build 2x2 Grid: Row 1 (items 0, 1) and Row 2 (items 2, 3)
+            val layoutNonce = _clickNonceCounter.incrementAndGet().toString(36)
             val row1 = LayoutElementBuilders.Row.Builder()
                 .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
-
             val row2 = LayoutElementBuilders.Row.Builder()
                 .setVerticalAlignment(LayoutElementBuilders.VERTICAL_ALIGN_CENTER)
 
@@ -463,20 +568,23 @@ abstract class BaseQuickActionsTileService(
                 }
 
                 if (dev != null) {
-                    val isButton = dev.isButtonAction
-                    val hasRapidToggle = (!dev.isThermostat && dev.primaryCapability != CAP_TARGET_TEMPERATURE) || dev.hasOnOff || isButton
+                    val hasRapidToggle = (!dev.isThermostat && dev.primaryCapability != CAP_TARGET_TEMPERATURE) ||
+                        dev.hasOnOff ||
+                        dev.isButtonAction
 
                     val clickableModifier = if (hasRapidToggle) {
-                        val cap = if (dev.isThermostat && dev.primaryCapability == CAP_TARGET_TEMPERATURE && dev.hasOnOff) CAP_ONOFF else dev.primaryCapability
-                        val targetActive = if (isButton) true else !dev.isActive
-                        val clickableId = "toggle|${dev.id}|$cap|$targetActive|$hubId"
+                        val cap = if (dev.isThermostat && dev.primaryCapability == CAP_TARGET_TEMPERATURE && dev.hasOnOff) {
+                            CAP_ONOFF
+                        } else {
+                            dev.primaryCapability
+                        }
+                        val clickableId = "press|${dev.id}|$cap|$hubId|${dev.isButtonAction}|${dev.fallbackIsActive}|$layoutNonce"
 
                         ModifiersBuilders.Clickable.Builder()
                             .setId(clickableId)
                             .setOnClick(ActionBuilders.LoadAction.Builder().build())
                             .build()
                     } else {
-                        // Open app on device detail for target hub
                         val openDetailAction = ActionBuilders.LaunchAction.Builder()
                             .setAndroidActivity(
                                 ActionBuilders.AndroidActivity.Builder()
@@ -491,45 +599,23 @@ abstract class BaseQuickActionsTileService(
                             .build()
                     }
 
-                    val hasCustomIcon = !dev.iconUrl.isNullOrBlank() && TileIconHelper.getCachedIconBytes(context, dev.iconUrl) != null
+                    val hasCustomIcon = !dev.iconUrl.isNullOrBlank() &&
+                        TileIconHelper.getCachedIconBytes(context, dev.iconUrl) != null
                     val iconId = if (hasCustomIcon) {
                         "tile_dev_icon_${dev.id}"
                     } else {
                         when {
-                            dev.isThermostat -> ID_IC_THERMOSTAT
-                            dev.isLight -> ID_IC_LIGHT
-                            dev.deviceClass == "lock" -> ID_IC_LOCK
-                            dev.deviceClass == "garagedoor" -> ID_IC_GARAGE
-                            else -> ID_IC_DEFAULT
+                            dev.isThermostat -> _ID_IC_THERMOSTAT
+                            dev.deviceClass == "light" || dev.deviceClass == "lamp" -> _ID_IC_LIGHT
+                            dev.deviceClass == "lock" -> _ID_IC_LOCK
+                            dev.deviceClass == "garagedoor" -> _ID_IC_GARAGE
+                            else -> _ID_IC_DEFAULT
                         }
                     }
 
-                    val buttonColor = when {
-                        // 1. Lights & Outlets
-                        dev.isLight || dev.primaryCapability == "onoff" -> {
-                            if (dev.isActive) 0xFF3D3219.toInt() else 0xFF2C2C2E.toInt()
-                        }
-                        // 2. Locks & Garage doors (isActive == false means locked/closed)
-                        dev.deviceClass == "lock" || dev.primaryCapability == "locked" ||
-                        dev.deviceClass == "garagedoor" || dev.primaryCapability == "garagedoor_closed" -> {
-                            val isProtected = !dev.isActive
-                            if (isProtected) 0xFF1E3A5F.toInt() else 0xFF2C2C2E.toInt()
-                        }
-                        // 3. Thermostats
-                        dev.isThermostat -> 0xFF2C2C2E.toInt()
-                        // 4. Buttons and other uncategorized devices
-                        else -> 0xFF2C2C2E.toInt()
-                    }
-
-                    // Device icons in Tile are always crisp white matching official Homey design
-                    val iconColor = 0xFFFFFFFF.toInt()
-
-                    val btn = Button.Builder(
-                        context,
-                        clickableModifier
-                    )
+                    val btn = Button.Builder(context, clickableModifier)
                         .setSize(dp(44f))
-                        .setButtonColors(ButtonColors(argb(buttonColor), argb(iconColor)))
+                        .setButtonColors(ButtonColors(argb(_COLOR_BUTTON_NEUTRAL), argb(_COLOR_ICON_WHITE)))
                         .setIconContent(iconId)
                         .build()
 
@@ -542,21 +628,20 @@ abstract class BaseQuickActionsTileService(
                     quadrantCol.addContent(
                         Text.Builder(context, dev.displayName)
                             .setTypography(Typography.TYPOGRAPHY_CAPTION2)
-                            .setColor(argb(0xFFCCCCCC.toInt()))
+                            .setColor(argb(_COLOR_LABEL_TEXT))
                             .setMaxLines(1)
                             .build()
                     )
 
                     targetRow.addContent(quadrantCol.build())
                 } else {
-                    // Empty placeholder button opening app
                     val btn = Button.Builder(
                         context,
                         ModifiersBuilders.Clickable.Builder().setOnClick(defaultOpenAppAction).build()
                     )
                         .setSize(dp(44f))
-                        .setButtonColors(ButtonColors(argb(0xFF1C1C1E.toInt()), argb(0xFF555555.toInt())))
-                        .setIconContent(ID_IC_DEFAULT)
+                        .setButtonColors(ButtonColors(argb(_COLOR_BUTTON_EMPTY_BG), argb(_COLOR_BUTTON_EMPTY_FG)))
+                        .setIconContent(_ID_IC_DEFAULT)
                         .build()
 
                     val quadrantCol = LayoutElementBuilders.Column.Builder()
@@ -575,22 +660,14 @@ abstract class BaseQuickActionsTileService(
             rootColumn.addContent(row2.build())
         }
 
-        val layout = LayoutElementBuilders.Layout.Builder()
-            .setRoot(rootColumn.build())
-            .build()
-
-        val entry = TimelineBuilders.TimelineEntry.Builder()
-            .setLayout(layout)
-            .build()
-
-        val timeline = TimelineBuilders.Timeline.Builder()
-            .addTimelineEntry(entry)
-            .build()
+        val layout = LayoutElementBuilders.Layout.Builder().setRoot(rootColumn.build()).build()
+        val entry = TimelineBuilders.TimelineEntry.Builder().setLayout(layout).build()
+        val timeline = TimelineBuilders.Timeline.Builder().addTimelineEntry(entry).build()
 
         return TileBuilders.Tile.Builder()
             .setResourcesVersion(resourcesVersion)
             .setTileTimeline(timeline)
-            .setFreshnessIntervalMillis(freshnessIntervalMillis)
+            .setFreshnessIntervalMillis(0L)
             .build()
     }
 }

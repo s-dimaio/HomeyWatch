@@ -26,10 +26,8 @@ class HomeyWatchApp : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
         Log.i(TAG, "[HomeyWatchApp:onCreate] Initializing HomeyWatch application.")
-        // Pre-warm DependencyManager
-        DependencyManager.getTokenStorage(this)
-        // Synchronize Wear OS Tile slots with configured hubs
-        com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlots(this)
+        // Synchronize Wear OS Tile slots asynchronously to avoid blocking startup on main thread
+        com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlotsAsync(this)
     }
 
     override fun newImageLoader(): ImageLoader {

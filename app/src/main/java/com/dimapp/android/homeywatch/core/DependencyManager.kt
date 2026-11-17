@@ -5,6 +5,7 @@ import android.util.Log
 import com.dimapp.android.homeywatch.BuildConfig
 import com.dimapp.android.homeywatch.api.HomeyApiClient
 import com.dimapp.android.homeywatch.api.HomeyApiService
+import com.dimapp.android.homeywatch.api.SanitizedHttpLogger
 import com.dimapp.android.homeywatch.auth.HomeyAuthRepository
 import com.dimapp.android.homeywatch.repository.DashboardRepository
 import com.dimapp.android.homeywatch.repository.DeviceRepository
@@ -16,7 +17,7 @@ import okhttp3.OkHttpClient
  * Service Locator managing shared dependencies for HomeyWatch.
  */
 object DependencyManager {
-    private const val TAG = "DependencyManager"
+    private const val _TAG = "DependencyManager"
 
     private var _storage: TokenStorage? = null
     private var _okHttpClient: OkHttpClient? = null
@@ -36,6 +37,7 @@ object DependencyManager {
      * @param context Application context.
      * @return The singleton [TokenStorage].
      */
+    @Synchronized
     fun getTokenStorage(context: Context): TokenStorage {
         if (_storage == null) {
             _storage = TokenStorage(context.applicationContext)
@@ -50,6 +52,7 @@ object DependencyManager {
      * @param context Application context.
      * @return The singleton [HomeyAuthRepository].
      */
+    @Synchronized
     fun getAuthRepository(context: Context): HomeyAuthRepository {
         if (_authRepository == null) {
             _authRepository = HomeyAuthRepository(
@@ -67,11 +70,12 @@ object DependencyManager {
      * @param context Application context.
      * @return The shared [OkHttpClient].
      */
+    @Synchronized
     fun getOkHttpClient(context: Context): OkHttpClient {
         if (_okHttpClient == null) {
             val authRepo = getAuthRepository(context)
             _okHttpClient = HomeyApiClient.buildSharedOkHttpClient(authRepo, BuildConfig.DEBUG)
-            Log.d(TAG, "[DependencyManager:getOkHttpClient] Shared OkHttpClient initialized.")
+            Log.d(_TAG, "[DependencyManager:getOkHttpClient] Shared OkHttpClient initialized.")
         }
         return _okHttpClient!!
     }
@@ -82,13 +86,18 @@ object DependencyManager {
      * @public
      * @param context Application context.
      * @return [HomeyApiService] instance, or null if no hub is selected.
+     * @example
+     * ```kotlin
+     * val service = DependencyManager.getApiService(context)
+     * ```
      */
+    @Synchronized
     fun getApiService(context: Context): HomeyApiService? {
         val storage = getTokenStorage(context)
         val baseUrl = storage.getBaseUrl() ?: return null
 
         if (_apiService == null || baseUrl != _lastBaseUrl) {
-            Log.d(TAG, "[DependencyManager:getApiService] Building HomeyApiService for URL: $baseUrl")
+            Log.d(_TAG, "[DependencyManager:getApiService] Building HomeyApiService for URL: ${SanitizedHttpLogger.sanitize(baseUrl)}")
             val client = getOkHttpClient(context)
             _apiService = HomeyApiClient.createWithClient(baseUrl, client)
             _lastBaseUrl = baseUrl
@@ -97,8 +106,17 @@ object DependencyManager {
     }
 
     /**
-     * Singleton accessor for [DeviceRepository].
+     * Returns the singleton [DeviceRepository] instance, creating it lazily if needed.
+     *
+     * @public
+     * @param context Application or Activity context.
+     * @return Shared [DeviceRepository] instance.
+     * @example
+     * ```kotlin
+     * val deviceRepo = DependencyManager.getDeviceRepository(context)
+     * ```
      */
+    @Synchronized
     fun getDeviceRepository(context: Context): DeviceRepository {
         if (_deviceRepository == null) {
             _deviceRepository = DeviceRepository(
@@ -111,8 +129,17 @@ object DependencyManager {
     }
 
     /**
-     * Singleton accessor for [DashboardRepository].
+     * Returns the singleton [DashboardRepository] instance, creating it lazily if needed.
+     *
+     * @public
+     * @param context Application or Activity context.
+     * @return Shared [DashboardRepository] instance.
+     * @example
+     * ```kotlin
+     * val dashboardRepo = DependencyManager.getDashboardRepository(context)
+     * ```
      */
+    @Synchronized
     fun getDashboardRepository(context: Context): DashboardRepository {
         if (_dashboardRepository == null) {
             _dashboardRepository = DashboardRepository(
@@ -125,8 +152,17 @@ object DependencyManager {
     }
 
     /**
-     * Singleton accessor for [FlowRepository].
+     * Returns the singleton [FlowRepository] instance, creating it lazily if needed.
+     *
+     * @public
+     * @param context Application or Activity context.
+     * @return Shared [FlowRepository] instance.
+     * @example
+     * ```kotlin
+     * val flowRepo = DependencyManager.getFlowRepository(context)
+     * ```
      */
+    @Synchronized
     fun getFlowRepository(context: Context): FlowRepository {
         if (_flowRepository == null) {
             _flowRepository = FlowRepository(

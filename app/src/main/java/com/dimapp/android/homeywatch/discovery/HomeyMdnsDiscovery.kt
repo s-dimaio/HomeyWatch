@@ -14,8 +14,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-private const val TAG = "HomeyMdnsDiscovery"
-private const val SERVICE_TYPE = "_homey._tcp"
+private const val _TAG = "HomeyMdnsDiscovery"
+private const val _SERVICE_TYPE = "_homey._tcp"
 
 /**
  * Data model representing a Homey Pro hub discovered via mDNS DNS-SD on the local network.
@@ -45,7 +45,7 @@ data class DiscoveredHomey(
  *
  * @param context Application context used to retrieve system services.
  */
-class HomeyMdnsDiscovery(private val context: Context) {
+class HomeyMdnsDiscovery(context: Context) {
 
     private val _nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val _wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -82,12 +82,12 @@ class HomeyMdnsDiscovery(private val context: Context) {
      */
     fun startDiscovery(timeoutMs: Long = 12000L) {
         if (_isSearching.value) {
-            Log.d(TAG, "[HomeyMdnsDiscovery:startDiscovery] Discovery is already active.")
+            Log.d(_TAG, "[HomeyMdnsDiscovery:startDiscovery] Discovery is already active.")
             return
         }
 
         if (_nsdManager == null) {
-            Log.w(TAG, "[HomeyMdnsDiscovery:startDiscovery] NsdManager is unavailable on this device.")
+            Log.w(_TAG, "[HomeyMdnsDiscovery:startDiscovery] NsdManager is unavailable on this device.")
             return
         }
 
@@ -131,7 +131,7 @@ class HomeyMdnsDiscovery(private val context: Context) {
      */
     private fun _startNsdDiscovery() {
         if (_discoveryListener != null) {
-            Log.d(TAG, "[HomeyMdnsDiscovery:_startNsdDiscovery] Discovery listener is already active.")
+            Log.d(_TAG, "[HomeyMdnsDiscovery:_startNsdDiscovery] Discovery listener is already active.")
             return
         }
 
@@ -139,12 +139,12 @@ class HomeyMdnsDiscovery(private val context: Context) {
 
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) {
-                Log.d(TAG, "[HomeyMdnsDiscovery:onDiscoveryStarted] Service discovery started for $regType")
+                Log.d(_TAG, "[HomeyMdnsDiscovery:onDiscoveryStarted] Service discovery started for $regType")
                 _isSearching.value = true
             }
 
             override fun onServiceFound(serviceInfo: NsdServiceInfo) {
-                Log.d(TAG, "[HomeyMdnsDiscovery:onServiceFound] Discovered service: name=${serviceInfo.serviceName}, type=${serviceInfo.serviceType}")
+                Log.d(_TAG, "[HomeyMdnsDiscovery:onServiceFound] Discovered service: name=${serviceInfo.serviceName}, type=${serviceInfo.serviceType}")
                 synchronized(_resolveLock) {
                     _pendingResolves.add(serviceInfo)
                     _processNextResolve()
@@ -152,33 +152,33 @@ class HomeyMdnsDiscovery(private val context: Context) {
             }
 
             override fun onServiceLost(serviceInfo: NsdServiceInfo) {
-                Log.d(TAG, "[HomeyMdnsDiscovery:onServiceLost] Service lost: ${serviceInfo.serviceName}")
+                Log.d(_TAG, "[HomeyMdnsDiscovery:onServiceLost] Service lost: ${serviceInfo.serviceName}")
             }
 
             override fun onDiscoveryStopped(serviceType: String) {
-                Log.d(TAG, "[HomeyMdnsDiscovery:onDiscoveryStopped] Service discovery stopped for $serviceType")
+                Log.d(_TAG, "[HomeyMdnsDiscovery:onDiscoveryStopped] Service discovery stopped for $serviceType")
                 _isSearching.value = false
                 _releaseMulticastLock()
             }
 
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
-                Log.e(TAG, "[HomeyMdnsDiscovery:onStartDiscoveryFailed] Start discovery failed: code $errorCode")
+                Log.e(_TAG, "[HomeyMdnsDiscovery:onStartDiscoveryFailed] Start discovery failed: code $errorCode")
                 stopDiscovery()
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
-                Log.e(TAG, "[HomeyMdnsDiscovery:onStopDiscoveryFailed] Stop discovery failed: code $errorCode")
+                Log.e(_TAG, "[HomeyMdnsDiscovery:onStopDiscoveryFailed] Stop discovery failed: code $errorCode")
             }
         }
 
         _discoveryListener = listener
 
         try {
-            _nsdManager?.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            _nsdManager?.discoverServices(_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
             _isSearching.value = true
-            Log.d(TAG, "[HomeyMdnsDiscovery:_startNsdDiscovery] Initiated discoverServices for $SERVICE_TYPE")
+            Log.d(_TAG, "[HomeyMdnsDiscovery:_startNsdDiscovery] Initiated discoverServices for $_SERVICE_TYPE")
         } catch (e: Exception) {
-            Log.e(TAG, "[HomeyMdnsDiscovery:_startNsdDiscovery] Exception starting discovery: ${e.message}")
+            Log.e(_TAG, "[HomeyMdnsDiscovery:_startNsdDiscovery] Exception starting discovery: ${e.message}")
             stopDiscovery()
         }
     }
@@ -193,7 +193,7 @@ class HomeyMdnsDiscovery(private val context: Context) {
         _timeoutJob?.cancel()
         _timeoutJob = _scope.launch {
             delay(timeoutMs)
-            Log.d(TAG, "[HomeyMdnsDiscovery:_scheduleTimeout] Discovery timeout reached (${timeoutMs}ms). Stopping...")
+            Log.d(_TAG, "[HomeyMdnsDiscovery:_scheduleTimeout] Discovery timeout reached (${timeoutMs}ms). Stopping...")
             stopDiscovery()
         }
     }
@@ -212,7 +212,7 @@ class HomeyMdnsDiscovery(private val context: Context) {
             try {
                 _nsdManager?.resolveService(nextService, object : NsdManager.ResolveListener {
                     override fun onResolveFailed(serviceInfo: NsdServiceInfo?, errorCode: Int) {
-                        Log.w(TAG, "[HomeyMdnsDiscovery:onResolveFailed] Failed to resolve ${serviceInfo?.serviceName}: code $errorCode")
+                        Log.w(_TAG, "[HomeyMdnsDiscovery:onResolveFailed] Failed to resolve ${serviceInfo?.serviceName}: code $errorCode")
                         synchronized(_resolveLock) {
                             _isResolving = false
                             _processNextResolve()
@@ -228,7 +228,7 @@ class HomeyMdnsDiscovery(private val context: Context) {
                     }
                 })
             } catch (e: Exception) {
-                Log.e(TAG, "[HomeyMdnsDiscovery:_processNextResolve] Exception resolving service: ${e.message}")
+                Log.e(_TAG, "[HomeyMdnsDiscovery:_processNextResolve] Exception resolving service: ${e.message}")
                 _isResolving = false
                 _processNextResolve()
             }
@@ -262,7 +262,9 @@ class HomeyMdnsDiscovery(private val context: Context) {
                     host = host,
                     port = port
                 )
-                Log.d(TAG, "[HomeyMdnsDiscovery:_handleResolvedService] Successfully resolved Homey hub: name=$name, id=$id, ip=$host:$port")
+                val maskedId = com.dimapp.android.homeywatch.api.SanitizedHttpLogger.maskId(id)
+                val maskedHost = com.dimapp.android.homeywatch.api.SanitizedHttpLogger.maskHost(host)
+                Log.d(_TAG, "[HomeyMdnsDiscovery:_handleResolvedService] Successfully resolved Homey hub: name=$name, id=$maskedId, ip=$maskedHost:$port")
 
                 val currentList = _discoveredHubs.value.toMutableList()
                 if (currentList.none { it.id == id }) {
@@ -270,10 +272,10 @@ class HomeyMdnsDiscovery(private val context: Context) {
                     _discoveredHubs.value = currentList
                 }
             } else {
-                Log.w(TAG, "[HomeyMdnsDiscovery:_handleResolvedService] Discovered service missing 'id' in TXT record: ${serviceInfo.serviceName}")
+                Log.w(_TAG, "[HomeyMdnsDiscovery:_handleResolvedService] Discovered service missing 'id' in TXT record: ${serviceInfo.serviceName}")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[HomeyMdnsDiscovery:_handleResolvedService] Error parsing resolved service: ${e.message}")
+            Log.e(_TAG, "[HomeyMdnsDiscovery:_handleResolvedService] Error parsing resolved service: ${e.message}")
         }
     }
 
@@ -286,9 +288,9 @@ class HomeyMdnsDiscovery(private val context: Context) {
         val listener = _discoveryListener ?: return
         try {
             _nsdManager?.stopServiceDiscovery(listener)
-            Log.d(TAG, "[HomeyMdnsDiscovery:_safeStopDiscovery] Service discovery stop requested.")
+            Log.d(_TAG, "[HomeyMdnsDiscovery:_safeStopDiscovery] Service discovery stop requested.")
         } catch (e: Exception) {
-            Log.d(TAG, "[HomeyMdnsDiscovery:_safeStopDiscovery] Stop discovery suppressed: ${e.message}")
+            Log.d(_TAG, "[HomeyMdnsDiscovery:_safeStopDiscovery] Stop discovery suppressed: ${e.message}")
         } finally {
             _discoveryListener = null
         }
@@ -308,10 +310,10 @@ class HomeyMdnsDiscovery(private val context: Context) {
             }
             if (_multicastLock?.isHeld == false) {
                 _multicastLock?.acquire()
-                Log.d(TAG, "[HomeyMdnsDiscovery:_acquireMulticastLock] Multicast lock acquired.")
+                Log.d(_TAG, "[HomeyMdnsDiscovery:_acquireMulticastLock] Multicast lock acquired.")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "[HomeyMdnsDiscovery:_acquireMulticastLock] Failed to acquire multicast lock: ${e.message}")
+            Log.w(_TAG, "[HomeyMdnsDiscovery:_acquireMulticastLock] Failed to acquire multicast lock: ${e.message}")
         }
     }
 
@@ -324,10 +326,10 @@ class HomeyMdnsDiscovery(private val context: Context) {
         try {
             if (_multicastLock?.isHeld == true) {
                 _multicastLock?.release()
-                Log.d(TAG, "[HomeyMdnsDiscovery:_releaseMulticastLock] Multicast lock released.")
+                Log.d(_TAG, "[HomeyMdnsDiscovery:_releaseMulticastLock] Multicast lock released.")
             }
         } catch (e: Exception) {
-            Log.w(TAG, "[HomeyMdnsDiscovery:_releaseMulticastLock] Failed to release multicast lock: ${e.message}")
+            Log.w(_TAG, "[HomeyMdnsDiscovery:_releaseMulticastLock] Failed to release multicast lock: ${e.message}")
         }
     }
 }

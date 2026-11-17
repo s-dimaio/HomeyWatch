@@ -2,6 +2,7 @@ package com.dimapp.android.homeywatch.storage
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.annotation.Keep
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKeys
 
@@ -9,49 +10,38 @@ import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
 import com.google.gson.reflect.TypeToken
 
-private const val PREFS_FILE_NAME = "homey_secure_prefs"
+private const val _PREFS_FILE_NAME = "homey_secure_prefs"
 
 // Active hub and multi-hub tokens map
-private const val KEY_HUB_TOKENS = "hub_tokens_json"
-private const val KEY_ACTIVE_HOMEY_ID = "active_homey_id"
-private const val KEY_ACTIVE_HOMEY_NAME = "active_homey_name"
-private const val KEY_ACTIVE_HOMEY_API_URL = "active_homey_api_url"
+private const val _KEY_HUB_TOKENS = "hub_tokens_json"
+private const val _KEY_ACTIVE_HOMEY_ID = "active_homey_id"
+private const val _KEY_ACTIVE_HOMEY_NAME = "active_homey_name"
+private const val _KEY_ACTIVE_HOMEY_API_URL = "active_homey_api_url"
 
 // OAuth2 session state
-private const val KEY_OAUTH_STATE = "oauth_state"
+private const val _KEY_OAUTH_STATE = "oauth_state"
 
 // User profile (display name only)
-private const val KEY_USER_NAME = "user_name"
+private const val _KEY_USER_NAME = "user_name"
 
 // UI preferences
-private const val KEY_HOME_SOURCE       = "home_source"
-private const val KEY_HOME_DASHBOARD_ID = "home_dashboard_id"
-private const val KEY_SYNC_INTERVAL     = "homey_sync_interval"
-
-// Geofence & Proactive alerts preferences
-private const val KEY_HOME_LAT            = "home_lat"
-private const val KEY_HOME_LNG            = "home_lng"
-private const val KEY_GEOFENCE_ENABLED    = "geofence_enabled"
-private const val KEY_GEOFENCE_AUTO_CLOSE = "geofence_auto_close"
-private const val KEY_GEOFENCE_RADIUS     = "geofence_radius"
-private const val KEY_LAST_FENCE_EVENT    = "last_fence_event"
-private const val KEY_GEOFENCE_BARRIER_IDS = "geofence_barrier_ids"
+private const val _KEY_SYNC_INTERVAL     = "homey_sync_interval"
 
 // Demo mode
-private const val KEY_IS_DEMO_MODE        = "is_demo_mode"
+private const val _KEY_IS_DEMO_MODE        = "is_demo_mode"
 
 /**
  * Entry for a single authenticated Homey hub.
  */
+@Keep
 data class HubTokenEntry(
     @SerializedName("sessionToken") val sessionToken: String? = null,
     @SerializedName("refreshSecret") val refreshSecret: String? = null,
     @SerializedName("name") val name: String? = null,
-    @SerializedName("apiUrl") val apiUrl: String? = null
+    @SerializedName("apiUrl") val apiUrl: String? = null,
+    @SerializedName("isReauthRequired") val isReauthRequired: Boolean = false,
+    @SerializedName("reauthReason") val reauthReason: String? = null
 )
-
-/** Possible sources for the Home tab device list. */
-enum class HomeSource { FAVORITES, DASHBOARD }
 
 /**
  * Secure encrypted storage for all Homey authentication and configuration data.
@@ -63,7 +53,7 @@ enum class HomeSource { FAVORITES, DASHBOARD }
  * - OAuth2 access token, refresh token, and expiry timestamp
  * - Temporary OAuth2 `state` parameter for CSRF protection
  * - Selected Homey hub ID, name, and API URL
- * - UI preferences (home source, dashboard ID, sync interval)
+ * - UI preferences (sync interval)
  *
  * Usage:
  * ```
@@ -77,46 +67,68 @@ enum class HomeSource { FAVORITES, DASHBOARD }
  * @property context The [Context] used to build the encrypted preferences file.
  * @constructor Creates a new [TokenStorage] instance for the given [context].
  */
-class TokenStorage(private val context: Context) {
+class TokenStorage(context: Context) {
+
+    private val _context: Context = context
 
     /** Lazily initialised encrypted preferences instance. */
-    private val prefs: SharedPreferences by lazy { _buildEncryptedPrefs() }
+    private val _prefs: SharedPreferences by lazy { _buildEncryptedPrefs() }
 
-    private val gson = Gson()
+    private val _gson = Gson()
 
     // ── Public Methods — OAuth2 State ────────────────────────────────────────
 
     /**
      * Saves the temporary OAuth2 `state` parameter used for CSRF protection.
      * Must be cleared (via [clearOAuthState]) after successful validation.
+     *
+     * @public
+     * @param state Random CSRF state token generated for the authorization flow.
+     * @example
+     * ```kotlin
+     * storage.saveOAuthState("csrf-token-123")
+     * ```
      */
     fun saveOAuthState(state: String) {
-        prefs.edit().putString(KEY_OAUTH_STATE, state).apply()
+        _prefs.edit().putString(_KEY_OAUTH_STATE, state).apply()
     }
 
-    /** Retrieves the saved OAuth2 `state` parameter. */
-    fun getOAuthState(): String? = prefs.getString(KEY_OAUTH_STATE, null)
+    /**
+     * Retrieves the saved OAuth2 `state` parameter.
+     *
+     * @public
+     * @return Saved CSRF state string, or `null` if none is stored.
+     */
+    fun getOAuthState(): String? = _prefs.getString(_KEY_OAUTH_STATE, null)
 
-    /** Removes the temporary OAuth2 `state` parameter after successful validation. */
+    /**
+     * Removes the temporary OAuth2 `state` parameter after successful validation.
+     *
+     * @public
+     */
     fun clearOAuthState() {
-        prefs.edit().remove(KEY_OAUTH_STATE).apply()
+        _prefs.edit().remove(_KEY_OAUTH_STATE).apply()
     }
 
+    /**
+     * Clears all authentication credentials, active hub selection, user profile,
+     * demo mode flags, and Tile slot assignments.
+     *
+     * @public
+     * @example
+     * ```kotlin
+     * storage.clearAllAuth()
+     * ```
+     */
     fun clearAllAuth() {
-        prefs.edit()
-            .remove(KEY_HUB_TOKENS)
-            .remove(KEY_ACTIVE_HOMEY_ID)
-            .remove(KEY_ACTIVE_HOMEY_NAME)
-            .remove(KEY_ACTIVE_HOMEY_API_URL)
-            .remove(KEY_OAUTH_STATE)
-            .remove(KEY_USER_NAME)
-            .remove(KEY_IS_DEMO_MODE)
-            .remove("${KEY_HOME_LAT}_demo")
-            .remove("${KEY_HOME_LNG}_demo")
-            .remove("${KEY_HOME_LAT}_default")
-            .remove("${KEY_HOME_LNG}_default")
-            .remove(KEY_HOME_LAT)
-            .remove(KEY_HOME_LNG)
+        _prefs.edit()
+            .remove(_KEY_HUB_TOKENS)
+            .remove(_KEY_ACTIVE_HOMEY_ID)
+            .remove(_KEY_ACTIVE_HOMEY_NAME)
+            .remove(_KEY_ACTIVE_HOMEY_API_URL)
+            .remove(_KEY_OAUTH_STATE)
+            .remove(_KEY_USER_NAME)
+            .remove(_KEY_IS_DEMO_MODE)
             .apply {
                 for (i in 1..4) {
                     remove("tile_slot_${i}_hub_id")
@@ -129,13 +141,20 @@ class TokenStorage(private val context: Context) {
     // ── Public Methods — Multi-Hub Token Management ───────────────────────────────
 
     /**
-     * Retrieves the map of all authenticated hubs.
+     * Retrieves the map of all authenticated hubs indexed by Homey Hub ID.
+     *
+     * @public
+     * @return Map from hub ID to validated [HubTokenEntry].
+     * @example
+     * ```kotlin
+     * val hubs = storage.getAllHubTokens()
+     * ```
      */
     fun getAllHubTokens(): Map<String, HubTokenEntry> {
-        val json = prefs.getString(KEY_HUB_TOKENS, null) ?: return emptyMap()
+        val json = _prefs.getString(_KEY_HUB_TOKENS, null) ?: return emptyMap()
         val type = object : TypeToken<Map<String, HubTokenEntry>>() {}.type
         return try {
-            val map: Map<String, HubTokenEntry>? = gson.fromJson(json, type)
+            val map: Map<String, HubTokenEntry>? = _gson.fromJson(json, type)
             map?.filterValues { it.sessionToken != null && it.name != null && it.apiUrl != null } ?: emptyMap()
         } catch (e: Exception) {
             emptyMap()
@@ -144,13 +163,21 @@ class TokenStorage(private val context: Context) {
 
     /**
      * Retrieves the token entry for a specific hub.
+     *
+     * @public
+     * @param homeyId Target Homey Hub ID.
+     * @return Matching [HubTokenEntry] or `null` if not stored.
      */
     fun getHubToken(homeyId: String): HubTokenEntry? {
         return getAllHubTokens()[homeyId]
     }
 
     /**
-     * Returns true if the specified hub has tokens stored.
+     * Returns true if the specified hub has valid tokens stored.
+     *
+     * @public
+     * @param homeyId Target Homey Hub ID.
+     * @return `true` if credentials exist for [homeyId].
      */
     fun isHubAuthenticated(homeyId: String): Boolean {
         return getHubToken(homeyId) != null
@@ -177,15 +204,10 @@ class TokenStorage(private val context: Context) {
         val tokensMap = getAllHubTokens().toMutableMap()
         tokensMap.remove(homeyId)
 
-        val editor = prefs.edit()
-        editor.remove("${KEY_HOME_LAT}_$homeyId")
-        editor.remove("${KEY_HOME_LNG}_$homeyId")
-        editor.remove("${KEY_GEOFENCE_BARRIER_IDS}_$homeyId")
-        editor.remove("${KEY_HOME_SOURCE}_$homeyId")
-        editor.remove("${KEY_HOME_DASHBOARD_ID}_$homeyId")
+        val editor = _prefs.edit()
 
         if (homeyId == "demo") {
-            editor.remove(KEY_IS_DEMO_MODE)
+            editor.remove(_KEY_IS_DEMO_MODE)
         }
 
         if (tokensMap.isEmpty()) {
@@ -195,15 +217,15 @@ class TokenStorage(private val context: Context) {
         }
 
         val wasActive = getSelectedHomeyId() == homeyId
-        editor.putString(KEY_HUB_TOKENS, gson.toJson(tokensMap))
+        editor.putString(_KEY_HUB_TOKENS, _gson.toJson(tokensMap))
 
         if (wasActive) {
             // Auto-switch to the first remaining hub
             val (newId, newEntry) = tokensMap.entries.first()
             editor
-                .putString(KEY_ACTIVE_HOMEY_ID, newId)
-                .putString(KEY_ACTIVE_HOMEY_NAME, newEntry.name)
-                .putString(KEY_ACTIVE_HOMEY_API_URL, newEntry.apiUrl)
+                .putString(_KEY_ACTIVE_HOMEY_ID, newId)
+                .putString(_KEY_ACTIVE_HOMEY_NAME, newEntry.name)
+                .putString(_KEY_ACTIVE_HOMEY_API_URL, newEntry.apiUrl)
         }
 
         editor.apply()
@@ -212,20 +234,75 @@ class TokenStorage(private val context: Context) {
 
     /**
      * Submits a fresh token for a hub, implicitly making it the active hub if saveAsActive is true.
+     * Clears any active re-authentication flags for this hub.
+     *
+     * @public
+     * @param homeyId The target hub ID.
+     * @param name Display name of the hub.
+     * @param sessionToken Delegated user session token.
+     * @param refreshSecret Athom Cloud refresh token for silent rotation.
+     * @param apiUrl Base API URL of the hub.
+     * @param saveAsActive Whether to set this hub as currently active.
      */
     fun saveHubToken(homeyId: String, name: String, sessionToken: String, refreshSecret: String, apiUrl: String, saveAsActive: Boolean = true) {
         val tokensMap = getAllHubTokens().toMutableMap()
-        tokensMap[homeyId] = HubTokenEntry(sessionToken, refreshSecret, name, apiUrl)
+        tokensMap[homeyId] = HubTokenEntry(
+            sessionToken = sessionToken,
+            refreshSecret = refreshSecret,
+            name = name,
+            apiUrl = apiUrl,
+            isReauthRequired = false,
+            reauthReason = null
+        )
         
-        val editor = prefs.edit().putString(KEY_HUB_TOKENS, gson.toJson(tokensMap))
+        val editor = _prefs.edit().putString(_KEY_HUB_TOKENS, _gson.toJson(tokensMap))
         
         if (saveAsActive) {
-            editor.putString(KEY_ACTIVE_HOMEY_ID, homeyId)
-                .putString(KEY_ACTIVE_HOMEY_NAME, name)
-                .putString(KEY_ACTIVE_HOMEY_API_URL, apiUrl)
+            editor.putString(_KEY_ACTIVE_HOMEY_ID, homeyId)
+                .putString(_KEY_ACTIVE_HOMEY_NAME, name)
+                .putString(_KEY_ACTIVE_HOMEY_API_URL, apiUrl)
         }
         
         editor.apply()
+    }
+
+    /**
+     * Marks whether a specific hub requires user re-authentication, along with an optional reason.
+     *
+     * @public
+     * @param homeyId The ID of the target hub.
+     * @param required Whether re-authentication is required.
+     * @param reason The diagnostic reason (e.g. `"COMPANION_UPDATED"` or `"EXPIRED"`).
+     */
+    fun setReauthRequired(homeyId: String, required: Boolean, reason: String? = null) {
+        val tokensMap = getAllHubTokens().toMutableMap()
+        val entry = tokensMap[homeyId] ?: return
+        tokensMap[homeyId] = entry.copy(isReauthRequired = required, reauthReason = if (required) reason else null)
+        _prefs.edit().putString(_KEY_HUB_TOKENS, _gson.toJson(tokensMap)).apply()
+    }
+
+    /**
+     * Checks if re-authentication is required for the specified hub (or currently active hub).
+     *
+     * @public
+     * @param hubId Optional target hub ID. Defaults to active hub.
+     * @return `true` if re-authentication is needed, `false` otherwise.
+     */
+    fun isReauthRequired(hubId: String? = null): Boolean {
+        val targetId = hubId ?: getSelectedHomeyId() ?: return false
+        return getHubToken(targetId)?.isReauthRequired == true
+    }
+
+    /**
+     * Retrieves the re-authentication reason for the specified hub (or currently active hub).
+     *
+     * @public
+     * @param hubId Optional target hub ID. Defaults to active hub.
+     * @return The reason string (e.g. `"COMPANION_UPDATED"`), or `null`.
+     */
+    fun getReauthReason(hubId: String? = null): String? {
+        val targetId = hubId ?: getSelectedHomeyId() ?: return null
+        return getHubToken(targetId)?.reauthReason
     }
 
     // ── Public Methods — Active Homey Selection ───────────────────────────────
@@ -233,44 +310,87 @@ class TokenStorage(private val context: Context) {
     /**
      * Saves the active Homey selection details without requiring tokens yet.
      * Used during initial setup before OAuth2 is completed.
+     *
+     * @public
+     * @param id Target Homey Hub ID.
+     * @param name Display name of the Homey hub.
+     * @param apiUrl Base API URL for the hub.
      */
     fun saveSelectedHomey(id: String, name: String, apiUrl: String) {
-        prefs.edit()
-            .putString(KEY_ACTIVE_HOMEY_ID, id)
-            .putString(KEY_ACTIVE_HOMEY_NAME, name)
-            .putString(KEY_ACTIVE_HOMEY_API_URL, apiUrl)
+        _prefs.edit()
+            .putString(_KEY_ACTIVE_HOMEY_ID, id)
+            .putString(_KEY_ACTIVE_HOMEY_NAME, name)
+            .putString(_KEY_ACTIVE_HOMEY_API_URL, apiUrl)
             .apply()
     }
 
     /**
      * Switches the active Homey hub. The hub MUST already have tokens stored.
+     *
+     * @public
+     * @param homeyId ID of the authenticated hub to activate.
+     * @return `true` if the switch succeeded, `false` if no token entry exists.
+     * @example
+     * ```kotlin
+     * val switched = storage.switchActiveHomey(hubId)
+     * ```
      */
     fun switchActiveHomey(homeyId: String): Boolean {
         val entry = getHubToken(homeyId) ?: return false
-        prefs.edit()
-            .putString(KEY_ACTIVE_HOMEY_ID, homeyId)
-            .putString(KEY_ACTIVE_HOMEY_NAME, entry.name)
-            .putString(KEY_ACTIVE_HOMEY_API_URL, entry.apiUrl)
+        _prefs.edit()
+            .putString(_KEY_ACTIVE_HOMEY_ID, homeyId)
+            .putString(_KEY_ACTIVE_HOMEY_NAME, entry.name)
+            .putString(_KEY_ACTIVE_HOMEY_API_URL, entry.apiUrl)
             .apply()
         return true
     }
 
-    fun getSelectedHomeyId(): String? = prefs.getString(KEY_ACTIVE_HOMEY_ID, null)
+    /**
+     * Returns the ID of the currently active Homey hub.
+     *
+     * @public
+     * @return Active hub ID string or `null` if unconfigured.
+     */
+    fun getSelectedHomeyId(): String? = _prefs.getString(_KEY_ACTIVE_HOMEY_ID, null)
     
+    /**
+     * Returns the display name of the currently active Homey hub (or localized Demo Hub title).
+     *
+     * @public
+     * @return Active hub name or `null` if unset.
+     */
     fun getSelectedHomeyName(): String? {
         if (isDemoMode()) {
-            return context.getString(com.dimapp.android.homeywatch.R.string.demo_hub_title)
+            return _context.getString(com.dimapp.android.homeywatch.R.string.demo_hub_title)
         }
-        return prefs.getString(KEY_ACTIVE_HOMEY_NAME, null)
+        return _prefs.getString(_KEY_ACTIVE_HOMEY_NAME, null)
     }
     
-    fun getSelectedHomeyApiUrl(): String? = prefs.getString(KEY_ACTIVE_HOMEY_API_URL, null)
+    /**
+     * Returns the base API URL of the currently active Homey hub.
+     *
+     * @public
+     * @return Base API URL or `null` if unset.
+     */
+    fun getSelectedHomeyApiUrl(): String? = _prefs.getString(_KEY_ACTIVE_HOMEY_API_URL, null)
 
+    /**
+     * Checks whether the application has an active hub with stored authentication tokens.
+     *
+     * @public
+     * @return `true` when configured and ready for API calls.
+     */
     fun isConfigured(): Boolean {
         val activeId = getSelectedHomeyId() ?: return false
         return isHubAuthenticated(activeId)
     }
 
+    /**
+     * Alias returning the base API URL of the active Homey hub.
+     *
+     * @public
+     * @return Base API URL or `null`.
+     */
     fun getBaseUrl(): String? = getSelectedHomeyApiUrl()
 
     // ── Public Methods — Tile Slot Hub Assignment ───────────────────────────
@@ -283,7 +403,7 @@ class TokenStorage(private val context: Context) {
      * @return The assigned Homey ID or "demo", or `null` if unassigned.
      */
     fun getTileSlotHubId(slotNumber: Int): String? {
-        return prefs.getString("tile_slot_${slotNumber}_hub_id", null)
+        return _prefs.getString("tile_slot_${slotNumber}_hub_id", null)
     }
 
     /**
@@ -294,7 +414,7 @@ class TokenStorage(private val context: Context) {
      * @return The cached hub name, or `null` if unassigned.
      */
     fun getTileSlotHubName(slotNumber: Int): String? {
-        return prefs.getString("tile_slot_${slotNumber}_hub_name", null)
+        return _prefs.getString("tile_slot_${slotNumber}_hub_name", null)
     }
 
     /**
@@ -306,7 +426,7 @@ class TokenStorage(private val context: Context) {
      * @param hubName The human-readable name of the hub.
      */
     fun setTileSlotHub(slotNumber: Int, hubId: String, hubName: String) {
-        prefs.edit()
+        _prefs.edit()
             .putString("tile_slot_${slotNumber}_hub_id", hubId)
             .putString("tile_slot_${slotNumber}_hub_name", hubName)
             .apply()
@@ -319,7 +439,7 @@ class TokenStorage(private val context: Context) {
      * @param slotNumber 1-based slot number (e.g. 1..4).
      */
     fun clearTileSlot(slotNumber: Int) {
-        prefs.edit()
+        _prefs.edit()
             .remove("tile_slot_${slotNumber}_hub_id")
             .remove("tile_slot_${slotNumber}_hub_name")
             .apply()
@@ -328,19 +448,51 @@ class TokenStorage(private val context: Context) {
     // ── Public Methods — Active Hub Session Tokens ─────────────────────────────
 
     /**
-     * Retrieves the session token for the currently active Homey hub.
+     * Retrieves the session token for the specified Homey hub, or the currently active hub if [hubId] is null.
      *
      * @public
+     * @param hubId Optional target hub ID. Defaults to active hub.
      * @return The raw session token string, or `null` if not authenticated.
      */
-    fun getHubSessionToken(): String? {
-        val activeId = getSelectedHomeyId() ?: return null
-        return getHubToken(activeId)?.sessionToken
+    fun getHubSessionToken(hubId: String? = null): String? {
+        val targetId = hubId ?: getSelectedHomeyId() ?: return null
+        return getHubToken(targetId)?.sessionToken
     }
 
-    fun getHubRefreshSecret(): String? {
-        val activeId = getSelectedHomeyId() ?: return null
-        return getHubToken(activeId)?.refreshSecret
+    /**
+     * Retrieves the refresh secret for the specified Homey hub, or the currently active hub if [hubId] is null.
+     *
+     * @public
+     * @param hubId Optional target hub ID. Defaults to active hub.
+     * @return The refresh secret string, or `null` if not available.
+     */
+    fun getHubRefreshSecret(hubId: String? = null): String? {
+        val targetId = hubId ?: getSelectedHomeyId() ?: return null
+        return getHubToken(targetId)?.refreshSecret
+    }
+
+    /**
+     * Overwrites the stored session token and refresh secret for the specified hub.
+     * Used during silent token rotation (`/auth/refresh`).
+     *
+     * @public
+     * @param homeyId The target hub ID.
+     * @param newSessionToken The updated session token.
+     * @param newRefreshSecret The updated refresh secret.
+     */
+    fun updateHubTokens(homeyId: String, newSessionToken: String, newRefreshSecret: String) {
+        val entry = getHubToken(homeyId) ?: return
+        val name = entry.name ?: (if (homeyId == getSelectedHomeyId()) getSelectedHomeyName() else null) ?: return
+        val apiUrl = entry.apiUrl ?: (if (homeyId == getSelectedHomeyId()) getSelectedHomeyApiUrl() else null) ?: return
+        val isCurrentlyActive = (homeyId == getSelectedHomeyId())
+        saveHubToken(
+            homeyId = homeyId,
+            name = name,
+            sessionToken = newSessionToken,
+            refreshSecret = newRefreshSecret,
+            apiUrl = apiUrl,
+            saveAsActive = isCurrentlyActive
+        )
     }
 
     /**
@@ -349,17 +501,7 @@ class TokenStorage(private val context: Context) {
      */
     fun updateActiveHubTokens(newSessionToken: String, newRefreshSecret: String) {
         val activeId = getSelectedHomeyId() ?: return
-        val entry = getHubToken(activeId) ?: return
-        val name = entry.name ?: getSelectedHomeyName() ?: return
-        val apiUrl = entry.apiUrl ?: getSelectedHomeyApiUrl() ?: return
-        saveHubToken(
-            homeyId = activeId,
-            name = name,
-            sessionToken = newSessionToken,
-            refreshSecret = newRefreshSecret,
-            apiUrl = apiUrl,
-            saveAsActive = true
-        )
+        updateHubTokens(activeId, newSessionToken, newRefreshSecret)
     }
 
     // ── Public Methods — User and Homeys List (Persisted on first login) ──────
@@ -374,60 +516,22 @@ class TokenStorage(private val context: Context) {
      * @param name The Athom account display name (e.g. "John Doe").
      */
     fun saveUserProfile(name: String?) {
-        prefs.edit()
-            .putString(KEY_USER_NAME, name ?: "Homey User")
+        _prefs.edit()
+            .putString(_KEY_USER_NAME, name ?: "Homey User")
             .apply()
     }
 
-    fun getUserName(): String? = prefs.getString(KEY_USER_NAME, null)
+    /**
+     * Returns the cached display name of the authenticated Athom user.
+     *
+     * @public
+     * @return Display name or `null` if not cached.
+     */
+    fun getUserName(): String? = _prefs.getString(_KEY_USER_NAME, null)
 
 
 
     // ── Public Methods — UI Preferences ────────────────────────────────────
-
-    /**
-     * Returns the current Home tab source selection.
-     * Defaults to [HomeSource.FAVORITES] if not yet configured.
-     *
-     * @public
-     * @return [HomeSource.FAVORITES] or [HomeSource.DASHBOARD].
-     * @example val source = storage.getHomeSource()
-     */
-    fun getHomeSource(): HomeSource {
-        val raw = prefs.getString(_getScopedKey(KEY_HOME_SOURCE), null)
-        return if (raw == HomeSource.DASHBOARD.name) HomeSource.DASHBOARD else HomeSource.FAVORITES
-    }
-
-    /**
-     * Persists the Home tab source selection.
-     *
-     * @public
-     * @param source [HomeSource.FAVORITES] or [HomeSource.DASHBOARD].
-     * @example storage.saveHomeSource(HomeSource.DASHBOARD)
-     */
-    fun saveHomeSource(source: HomeSource) {
-        prefs.edit().putString(_getScopedKey(KEY_HOME_SOURCE), source.name).apply()
-    }
-
-    /**
-     * Returns the UUID of the dashboard selected as the Home source, or `null` if not set.
-     *
-     * @public
-     * @return Dashboard UUID string, or `null`.
-     * @example val id = storage.getHomeDashboardId()
-     */
-    fun getHomeDashboardId(): String? = prefs.getString(_getScopedKey(KEY_HOME_DASHBOARD_ID), null)
-
-    /**
-     * Persists the UUID of the dashboard chosen as the Home tab source.
-     *
-     * @public
-     * @param dashboardId UUID of the selected dashboard.
-     * @example storage.saveHomeDashboardId("f3959433-a516-4600-a510-26fbda1bcbd1")
-     */
-    fun saveHomeDashboardId(dashboardId: String) {
-        prefs.edit().putString(_getScopedKey(KEY_HOME_DASHBOARD_ID), dashboardId).apply()
-    }
 
     /**
      * Saves the sync interval in seconds.
@@ -437,7 +541,7 @@ class TokenStorage(private val context: Context) {
      * @example storage.saveSyncInterval(10)
      */
     fun saveSyncInterval(seconds: Int) {
-        prefs.edit().putInt(KEY_SYNC_INTERVAL, seconds).apply()
+        _prefs.edit().putInt(_KEY_SYNC_INTERVAL, seconds).apply()
     }
 
     /**
@@ -447,112 +551,7 @@ class TokenStorage(private val context: Context) {
      * @return Sync interval in seconds.
      * @example val interval = storage.getSyncInterval()
      */
-    fun getSyncInterval(): Int = prefs.getInt(KEY_SYNC_INTERVAL, 15)
-
-    // ── Public Methods — Geofencing ──────────────────────────────────────────
-
-    /**
-     * Saves the Homey hub geographical coordinates for geofence registration.
-     */
-    fun saveHomeLocation(lat: Double, lng: Double, hubId: String? = null) {
-        val targetHub = hubId ?: getSelectedHomeyId() ?: return
-        if (targetHub == "demo") return
-        prefs.edit()
-            .putString("${KEY_HOME_LAT}_$targetHub", lat.toString())
-            .putString("${KEY_HOME_LNG}_$targetHub", lng.toString())
-            .apply()
-    }
-
-    /**
-     * Retrieves the saved Homey hub geographical coordinates.
-     * Always returns null for demo mode to ensure no real or mock home coordinates are used.
-     */
-    fun getHomeLocation(hubId: String? = null): Pair<Double, Double>? {
-        if (hubId == "demo" || (hubId == null && isDemoMode())) return null
-        val targetHub = hubId ?: getSelectedHomeyId() ?: return null
-        if (targetHub == "demo") return null
-        val latStr = prefs.getString("${KEY_HOME_LAT}_$targetHub", null)
-        val lngStr = prefs.getString("${KEY_HOME_LNG}_$targetHub", null)
-        val lat = latStr?.toDoubleOrNull() ?: return null
-        val lng = lngStr?.toDoubleOrNull() ?: return null
-        return Pair(lat, lng)
-    }
-
-    /**
-     * Checks if geofencing alerts are globally enabled.
-     */
-    fun isGeofenceEnabled(): Boolean = prefs.getBoolean(KEY_GEOFENCE_ENABLED, true)
-
-    /**
-     * Sets whether geofencing alerts are enabled.
-     */
-    fun setGeofenceEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_GEOFENCE_ENABLED, enabled).apply()
-    }
-
-    /**
-     * Checks if automatic closure of barriers on departure is enabled.
-     * Currently forced to false as automated actions will be handled via Homey Flow triggers.
-     */
-    fun isGeofenceAutoCloseEnabled(): Boolean = false
-
-    /**
-     * Sets whether automatic closure of barriers on departure is enabled.
-     */
-    fun setGeofenceAutoCloseEnabled(enabled: Boolean) {
-        prefs.edit().putBoolean(KEY_GEOFENCE_AUTO_CLOSE, enabled).apply()
-    }
-
-    /**
-     * Retrieves the configured geofence radius in meters (default: 300m).
-     */
-    fun getGeofenceRadius(): Float = prefs.getFloat(KEY_GEOFENCE_RADIUS, 300f)
-
-    /**
-     * Sets the geofence radius in meters.
-     */
-    fun setGeofenceRadius(radius: Float) {
-        prefs.edit().putFloat(KEY_GEOFENCE_RADIUS, radius).apply()
-    }
-
-    /**
-     * Records a log stamp for the last detected geofence event.
-     */
-    fun setLastFenceEvent(eventDescription: String) {
-        prefs.edit().putString(KEY_LAST_FENCE_EVENT, eventDescription).apply()
-    }
-
-    /**
-     * Retrieves the last recorded geofence event description.
-     */
-    fun getLastFenceEvent(): String? = prefs.getString(KEY_LAST_FENCE_EVENT, null)
-
-    /**
-     * Saves the list of barrier device IDs configured for proximity alerts.
-     *
-     * @public
-     * @param ids List of device IDs selected by the user in companion app.
-     * @param hubId Optional target hub ID, defaults to currently active hub.
-     */
-    fun saveGeofenceDeviceIds(ids: List<String>, hubId: String? = null) {
-        val targetHub = hubId ?: getSelectedHomeyId() ?: return
-        prefs.edit()
-            .putStringSet("${KEY_GEOFENCE_BARRIER_IDS}_$targetHub", ids.toSet())
-            .apply()
-    }
-
-    /**
-     * Retrieves the list of barrier device IDs configured for proximity alerts.
-     *
-     * @public
-     * @param hubId Optional target hub ID, defaults to currently active hub.
-     * @return List of configured barrier device IDs, or empty list if none selected.
-     */
-    fun getGeofenceDeviceIds(hubId: String? = null): List<String> {
-        val targetHub = hubId ?: getSelectedHomeyId() ?: return emptyList()
-        val set = prefs.getStringSet("${KEY_GEOFENCE_BARRIER_IDS}_$targetHub", null)
-        return set?.toList() ?: emptyList()
-    }
+    fun getSyncInterval(): Int = _prefs.getInt(_KEY_SYNC_INTERVAL, 15)
 
     // ── Public Methods — Demo Mode ───────────────────────────────────────────
 
@@ -560,6 +559,7 @@ class TokenStorage(private val context: Context) {
      * Checks whether the app is currently running in mock Demo Mode.
      * Evaluates dynamically based on whether the active hub is "demo".
      *
+     * @public
      * @return True if in demo mode.
      */
     fun isDemoMode(): Boolean = getSelectedHomeyId() == "demo"
@@ -567,8 +567,7 @@ class TokenStorage(private val context: Context) {
     /**
      * Enables or disables demo mode based on [enabled].
      *
-     * Public method.
-     *
+     * @public
      * @param enabled True to enable demo mode, false to clear it.
      * @example
      * storage.setDemoMode(true)
@@ -583,38 +582,32 @@ class TokenStorage(private val context: Context) {
 
     /**
      * Activates Demo Mode, registering a mock hub with sample configuration.
-     * Note: Home coordinates are intentionally NOT configured in demo mode.
+     *
+     * @public
      */
     fun enableDemoMode() {
-        prefs.edit()
-            .putBoolean(KEY_IS_DEMO_MODE, true)
-            .remove("${KEY_HOME_LAT}_demo")
-            .remove("${KEY_HOME_LNG}_demo")
-            .remove("${KEY_HOME_LAT}_default")
-            .remove("${KEY_HOME_LNG}_default")
-            .remove(KEY_HOME_LAT)
-            .remove(KEY_HOME_LNG)
+        _prefs.edit()
+            .putBoolean(_KEY_IS_DEMO_MODE, true)
             .apply()
 
         saveHubToken(
             homeyId = "demo",
-            name = context.getString(com.dimapp.android.homeywatch.R.string.demo_hub_title),
+            name = _context.getString(com.dimapp.android.homeywatch.R.string.demo_hub_title),
             sessionToken = "demo_session_token",
             refreshSecret = "demo_refresh_secret",
             apiUrl = "https://demo.connect.athom.com",
             saveAsActive = true
         )
-        saveGeofenceDeviceIds(listOf("demo_front_door", "demo_main_garage"), "demo")
     }
 
     /**
      * Deactivates Demo Mode and removes the mock hub from storage.
+     *
+     * @public
      */
     fun clearDemoMode() {
-        prefs.edit()
-            .remove(KEY_IS_DEMO_MODE)
-            .remove("${KEY_HOME_LAT}_demo")
-            .remove("${KEY_HOME_LNG}_demo")
+        _prefs.edit()
+            .remove(_KEY_IS_DEMO_MODE)
             .apply()
         removeHubToken("demo")
     }
@@ -626,19 +619,7 @@ class TokenStorage(private val context: Context) {
      * @example storage.clearAll()
      */
     fun clearAll() {
-        prefs.edit().clear().apply()
-    }
-
-    /**
-     * Generates a preference key scoped to the currently active Homey hub.
-     *
-     * @private
-     * @param baseKey The original setting key (e.g. "home_source").
-     * @return A scoped key (e.g. "home_source_abc123") or the baseKey if no hub is active.
-     */
-    private fun _getScopedKey(baseKey: String): String {
-        val activeId = getSelectedHomeyId() ?: return baseKey
-        return "${baseKey}_$activeId"
+        _prefs.edit().clear().apply()
     }
 
     /**
@@ -652,9 +633,9 @@ class TokenStorage(private val context: Context) {
     private fun _buildEncryptedPrefs(): SharedPreferences {
         val masterKeyAlias = MasterKeys.getOrCreate(MasterKeys.AES256_GCM_SPEC)
         return EncryptedSharedPreferences.create(
-            PREFS_FILE_NAME,
+            _PREFS_FILE_NAME,
             masterKeyAlias,
-            context,
+            _context,
             EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
             EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
         )

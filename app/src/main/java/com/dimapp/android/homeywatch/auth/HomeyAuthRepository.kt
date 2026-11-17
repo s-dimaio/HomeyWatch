@@ -9,6 +9,7 @@ import com.dimapp.android.homeywatch.BuildConfig
 import com.dimapp.android.homeywatch.api.CompanionToken
 import com.dimapp.android.homeywatch.api.HomeyCompanionApiClient
 import com.dimapp.android.homeywatch.api.RefreshAuthRequest
+import com.dimapp.android.homeywatch.api.SanitizedHttpLogger
 import com.dimapp.android.homeywatch.api.StartAuthRequest
 import com.dimapp.android.homeywatch.storage.TokenStorage
 import kotlinx.coroutines.guava.await
@@ -49,12 +50,14 @@ class HomeyAuthRepository(
      * Retrieves the Hub session token formatted as `"Bearer <token>"`.
      *
      * @public
+     * @param hubId Optional target hub ID. Defaults to the currently active hub.
      * @return Valid Bearer token header string, or `null`.
      */
-    suspend fun getValidDelegationToken(): String? {
-        val sessionToken = storage.getHubSessionToken()
+    suspend fun getValidDelegationToken(hubId: String? = null): String? {
+        val sessionToken = storage.getHubSessionToken(hubId)
         if (sessionToken.isNullOrBlank()) {
-            Log.w(TAG, "[HomeyAuthRepository:getValidDelegationToken] No Hub session token found.")
+            val target = hubId ?: storage.getSelectedHomeyId()
+            Log.w(TAG, "[HomeyAuthRepository:getValidDelegationToken] No Hub session token found for hub ${SanitizedHttpLogger.maskId(target)}.")
             return null
         }
         return "Bearer $sessionToken"
@@ -63,39 +66,55 @@ class HomeyAuthRepository(
     /**
      * Silently refreshes the Hub session token using the Companion app's `/auth/refresh` endpoint.
      *
+     * Uses the Token Rotation pattern: sends the current `refresh_secret` and receives a new
+     * session token along with a new `refresh_secret`. If rejected (e.g. `COMPANION_UPDATED` or expired),
+     * marks re-authentication required on the hub so the UI prompts for re-pairing.
+     *
      * @public
      * @param failedToken The token that failed with HTTP 401.
+     * @param hubId Optional target hub ID. Defaults to the currently active hub.
      * @return `true` if refresh succeeded, `false` otherwise.
      */
-    suspend fun refreshHubSessionToken(failedToken: String? = null): Boolean = globalRefreshMutex.withLock {
-        val currentTokenString = getValidDelegationToken()
+    suspend fun refreshHubSessionToken(failedToken: String? = null, hubId: String? = null): Boolean = globalRefreshMutex.withLock {
+        val targetId = hubId ?: storage.getSelectedHomeyId()
+        val currentTokenString = getValidDelegationToken(targetId)
         if (failedToken != null && failedToken != currentTokenString && currentTokenString != null) {
-            Log.i(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Token was already refreshed by another concurrent request.")
+            Log.i(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Token for hub ${SanitizedHttpLogger.maskId(targetId)} was already refreshed by another concurrent request.")
             return@withLock true
         }
 
-        val homeyId = storage.getSelectedHomeyId()
-        val refreshSecret = storage.getHubRefreshSecret()
+        val refreshSecret = storage.getHubRefreshSecret(targetId)
 
-        if (homeyId.isNullOrBlank() || refreshSecret.isNullOrBlank()) {
-            Log.w(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Cannot refresh: missing homeyId or refreshSecret.")
+        if (targetId.isNullOrBlank() || refreshSecret.isNullOrBlank()) {
+            Log.w(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Cannot refresh: missing targetId or refreshSecret for ${SanitizedHttpLogger.maskId(targetId)}.")
+            if (!targetId.isNullOrBlank()) {
+                storage.setReauthRequired(targetId, true, "EXPIRED")
+            }
             return@withLock false
         }
 
         return@withLock try {
-            val service = HomeyCompanionApiClient.create(homeyId, BuildConfig.DEBUG)
+            val service = HomeyCompanionApiClient.create(targetId, BuildConfig.DEBUG)
             val response = service.refreshAuth(RefreshAuthRequest(refreshSecret))
 
             if (!response.session_token.isNullOrBlank() && !response.athom_refresh_token.isNullOrBlank()) {
-                storage.updateActiveHubTokens(response.session_token, response.athom_refresh_token)
-                Log.i(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Hub session token refreshed successfully.")
+                storage.updateHubTokens(targetId, response.session_token, response.athom_refresh_token)
+                storage.setReauthRequired(targetId, false)
+                Log.i(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Hub session token refreshed successfully for ${SanitizedHttpLogger.maskId(targetId)}.")
                 true
             } else {
-                Log.e(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Invalid refresh response payload.")
+                Log.e(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Invalid refresh response payload for ${SanitizedHttpLogger.maskId(targetId)}.")
+                storage.setReauthRequired(targetId, true, "EXPIRED")
                 false
             }
         } catch (e: Exception) {
-            Log.e(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Refresh failed: ${e.message}")
+            val errorBody = try { (e as? retrofit2.HttpException)?.response()?.errorBody()?.string().orEmpty() } catch (_: Exception) { "" }
+            Log.e(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Refresh failed for ${SanitizedHttpLogger.maskId(targetId)}: ${e.message} (errorBody='${SanitizedHttpLogger.sanitize(errorBody)}')")
+            if (e is retrofit2.HttpException && (e.code() == 400 || e.code() == 401 || e.code() == 403)) {
+                val isCompanionUpdated = errorBody.contains("COMPANION_UPDATED") || errorBody.contains("REAUTH_REQUIRED")
+                Log.w(TAG, "[HomeyAuthRepository:refreshHubSessionToken] Auth refresh rejected with HTTP ${e.code()} (isCompanionUpdated=$isCompanionUpdated) for ${SanitizedHttpLogger.maskId(targetId)}.")
+                storage.setReauthRequired(targetId, true, if (isCompanionUpdated) "COMPANION_UPDATED" else "EXPIRED")
+            }
             false
         }
     }
@@ -182,7 +201,7 @@ class HomeyAuthRepository(
                     }
 
                     _saveAuthData(token)
-                    Log.d(TAG, "[HomeyAuthRepository:pollCompanionAuth] Authentication complete for hub ${token.homey_id}")
+                    Log.d(TAG, "[HomeyAuthRepository:pollCompanionAuth] Authentication complete for hub ${SanitizedHttpLogger.maskId(token.homey_id)}")
                     PollResult.Success
                 }
                 "expired" -> {
@@ -241,10 +260,6 @@ class HomeyAuthRepository(
 
         token.user?.let {
             storage.saveUserProfile(it.name)
-        }
-
-        token.location?.let { loc ->
-            storage.saveHomeLocation(loc.latitude, loc.longitude, homeyId)
         }
     }
 }

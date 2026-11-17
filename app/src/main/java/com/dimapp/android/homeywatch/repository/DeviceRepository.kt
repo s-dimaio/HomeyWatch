@@ -2,10 +2,13 @@ package com.dimapp.android.homeywatch.repository
 
 import android.content.Context
 import com.dimapp.android.homeywatch.R
-import com.dimapp.android.homeywatch.api.HomeyApiClient
+import com.dimapp.android.homeywatch.api.HomeyApiService
+import com.dimapp.android.homeywatch.api.SanitizedHttpLogger
 import com.dimapp.android.homeywatch.api.models.DeviceDto
 import com.dimapp.android.homeywatch.api.models.SetCapabilityBody
+import com.dimapp.android.homeywatch.api.models.UserMeDto
 import com.dimapp.android.homeywatch.api.models.ZoneDto
+import retrofit2.Response
 import com.dimapp.android.homeywatch.repository.models.CAP_GARAGEDOOR
 import com.dimapp.android.homeywatch.repository.models.CAP_ONOFF
 import com.dimapp.android.homeywatch.repository.models.CAP_DIM
@@ -26,9 +29,12 @@ import com.dimapp.android.homeywatch.repository.models.isButtonOrActionCapabilit
 import com.dimapp.android.homeywatch.api.models.CapabilityDto
 import com.dimapp.android.homeywatch.api.models.InsightLogDto
 import com.google.gson.Gson
+import com.google.gson.JsonArray
+import com.google.gson.JsonElement
 import com.dimapp.android.homeywatch.auth.HomeyAuthRepository
 import com.dimapp.android.homeywatch.storage.TokenStorage
-import com.dimapp.android.homeywatch.tile.TileIconHelper
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -37,6 +43,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import android.util.Log
 
 /**
@@ -48,14 +56,20 @@ class DeviceRepository(
     authRepo: HomeyAuthRepository
 ) : HomeyBaseRepository(context, storage, authRepo) {
  
-    private val TAG = "DeviceRepository"
-    private val cacheMutex = Mutex()
-    private var cachedDevices: List<HomeyDevice>? = null
-    private var cachedHubId: String? = null
-    private var cachedZoneTemperatures: Map<String, Double> = emptyMap()
-    private var demoDevices: MutableList<HomeyDevice>? = null
-    private var demoDevices2: MutableList<HomeyDevice>? = null
-    private val cachedHubDevices = mutableMapOf<String, List<HomeyDevice>>()
+    private val _TAG = "DeviceRepository"
+    private val _cacheMutex = Mutex()
+    private val _insightLogsMutex = Mutex()
+    private var _cachedDevices: List<HomeyDevice>? = null
+    private var _cachedHubId: String? = null
+    private var _cachedZoneTemperatures: Map<String, Double> = emptyMap()
+    private var _cachedZoneIdToPath: Map<String, String> = emptyMap()
+    private var _cachedInsightLogs: List<InsightLogDto>? = null
+    private var _cachedInsightLogsHubId: String? = null
+    private var _cachedInsightLogsTimestampMs: Long = 0L
+    private var _cachedInsightLogsServerDateMs: Long? = null
+    private var _demoDevices: MutableList<HomeyDevice>? = null
+    private var _demoDevices2: MutableList<HomeyDevice>? = null
+    private val _cachedHubDevices = mutableMapOf<String, List<HomeyDevice>>()
 
     private val _devicesFlow = MutableStateFlow<List<HomeyDevice>>(emptyList())
     val devicesFlow: StateFlow<List<HomeyDevice>> = _devicesFlow.asStateFlow()
@@ -71,20 +85,25 @@ class DeviceRepository(
      *
      * @public
      * @return Epoch millisecond timestamp.
+     * @example
+     * ```kotlin
+     * val lastSync = repo.getLastSyncTimestamp()
+     * ```
      */
     fun getLastSyncTimestamp(): Long = _lastSyncTimestamp
 
     /**
      * Returns the latest computed average temperatures mapped by zone name.
      *
-     * Public method.
-     *
+     * @public
      * @return Map of zone name to average temperature in degrees Celsius.
      * @example
+     * ```kotlin
      * val temps = repo.getZoneTemperatures()
+     * ```
      */
     fun getZoneTemperatures(): Map<String, Double> {
-        return cachedZoneTemperatures
+        return _cachedZoneTemperatures
     }
 
 
@@ -93,127 +112,142 @@ class DeviceRepository(
      *
      * The cache is automatically invalidated if the active hub ID changes.
      * To force a network refresh, set [forceRefresh] to true.
+     *
+     * @public
+     * @param forceRefresh If `true`, bypasses the in-memory cache and reloads from network.
+     * @return [HomeyResult.Success] containing the sorted list of [HomeyDevice] items, or [HomeyResult.Error].
+     * @example
+     * ```kotlin
+     * val result = repo.getDevices(forceRefresh = true)
+     * ```
      */
-    suspend fun getDevices(forceRefresh: Boolean = false): HomeyResult<List<HomeyDevice>> = cacheMutex.withLock {
-        // Handle Demo Mode directly without network interaction
-        if (storage.isDemoMode()) {
-            cachedZoneTemperatures = mapOf(
-                context.getString(R.string.demo_zone_ground_floor) to 21.5,
-                context.getString(R.string.demo_zone_outside) to 18.0
-            )
-            if (demoDevices == null || forceRefresh) {
-                demoDevices = _createDemoDevices().toMutableList()
-                Log.d(TAG, "Initialized demo devices list with ${demoDevices?.size} mock devices.")
-            }
-            _devicesFlow.value = demoDevices!!.toList()
-            _lastSyncTimestamp = System.currentTimeMillis()
-            return HomeyResult.Success(demoDevices!!.toList())
-        }
-
-        val currentHubId = storage.getSelectedHomeyId() ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-        
-        // 1. Check if we have valid cached data for the current hub
-        // If forceRefresh is true, we skip the cache and go straight to network.
-        if (!forceRefresh && cachedHubId == currentHubId && cachedDevices != null) {
-            Log.d(TAG, "Returning ${cachedDevices?.size} devices from in-memory cache.")
-            _devicesFlow.value = cachedDevices!!
-            return HomeyResult.Success(cachedDevices!!)
-        }
-
-        // 2. Fetch from network if cache is missing, stale, or forced
-        val reason = when {
-            forceRefresh -> "Forced refresh"
-            cachedHubId != currentHubId -> "Hub changed ($cachedHubId -> $currentHubId)"
-            else -> "Cache empty"
-        }
-        Log.d(TAG, "$reason. Fetching from network...")
-
-        val service = _buildService()
-        if (service == null) {
-            Log.e(TAG, "Cannot fetch devices: HomeyApiService is null (check if Hub is configured).")
-            return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-        }
-
-        return try {
-            val devicesResponse = service.getDevices()
-            val zonesResponse = service.getZones()
-            val userResponse = service.getUserMe()
-
-            if (!devicesResponse.isSuccessful) {
-                val errorBody = devicesResponse.errorBody()?.string()
-                Log.e(TAG, "Devices fetch failed: HTTP ${devicesResponse.code()} - $errorBody")
-                return HomeyResult.Error(context.getString(R.string.repo_error_devices_http, devicesResponse.code()))
-            }
-            if (!zonesResponse.isSuccessful) {
-                val errorBody = zonesResponse.errorBody()?.string()
-                Log.e(TAG, "Zones fetch failed: HTTP ${zonesResponse.code()} - $errorBody")
-                return HomeyResult.Error(context.getString(R.string.repo_error_zones_http, zonesResponse.code()))
-            }
-
-            val devices = devicesResponse.body() ?: emptyMap()
-            val zones = zonesResponse.body() ?: emptyMap()
-            val favoritesList = userResponse.body()?.properties?.favoriteDevices ?: emptyList()
-
-            // Compute average room temperatures across all devices reporting measure_temperature in each zone
-            val zoneTempReadings = mutableMapOf<String, MutableList<Double>>()
-            for (dto in devices.values) {
-                val zoneId = dto.zone ?: continue
-                val caps = dto.capabilitiesObj ?: continue
-                val tempCap = caps["measure_temperature"]
-                val tempVal = (tempCap?.value as? Number)?.toDouble()
-                if (tempVal != null && !tempVal.isNaN()) {
-                    zoneTempReadings.getOrPut(zoneId) { mutableListOf() }.add(tempVal)
+    suspend fun getDevices(forceRefresh: Boolean = false): HomeyResult<List<HomeyDevice>> = withContext(Dispatchers.IO) {
+        _cacheMutex.withLock {
+            // Handle Demo Mode directly without network interaction
+            if (storage.isDemoMode()) {
+                _cachedZoneTemperatures = mapOf(
+                    context.getString(R.string.demo_zone_ground_floor) to 21.5,
+                    context.getString(R.string.demo_zone_outside) to 18.0
+                )
+                if (_demoDevices == null || forceRefresh) {
+                    _demoDevices = _createDemoDevices().toMutableList()
+                    Log.d(_TAG, "[DeviceRepository:getDevices] Initialized demo devices list with ${_demoDevices?.size} mock devices.")
                 }
+                _devicesFlow.value = _demoDevices!!.toList()
+                _lastSyncTimestamp = System.currentTimeMillis()
+                return@withLock HomeyResult.Success(_demoDevices!!.toList())
             }
-            val computedTemps = mutableMapOf<String, Double>()
-            for ((zId, readings) in zoneTempReadings) {
-                if (readings.isNotEmpty()) {
-                    val zonePathName = _buildZonePathName(zId, zones)
-                    computedTemps[zonePathName] = readings.average()
-                }
-            }
-            cachedZoneTemperatures = computedTemps
 
-            val excludedIds = devices.values
-                .flatMap { it.settings?.deviceIds ?: emptyList() }
-                .toSet()
-
-            val globalZoneOrder = _computeGlobalZoneOrder(zones)
-
-            val mappedDevices = devices.values
-                .filter { device -> _isSupportedDevice(device) }
-                .map { device -> _toHomeyDevice(device, zones, favoritesList, excludedIds, globalZoneOrder) }
-                .sortedBy { it.name }
-
-            // 3. Update cache
-            cachedDevices = mappedDevices
-            cachedHubId = currentHubId
-            _devicesFlow.value = mappedDevices
-            _lastSyncTimestamp = System.currentTimeMillis()
+            val currentHubId = storage.getSelectedHomeyId() ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
             
-            // Asynchronously preload icons for fast Tile & UI display
-            TileIconHelper.preloadDeviceIcons(context, mappedDevices, currentHubId)
+            // 1. Check if we have valid cached data for the current hub
+            // If forceRefresh is true, we skip the cache and go straight to network.
+            if (!forceRefresh && _cachedHubId == currentHubId && _cachedDevices != null) {
+                Log.d(_TAG, "[DeviceRepository:getDevices] Returning ${_cachedDevices?.size} devices from in-memory cache.")
+                _devicesFlow.value = _cachedDevices!!
+                return@withLock HomeyResult.Success(_cachedDevices!!)
+            }
 
-            Log.d(TAG, "Fetched ${mappedDevices.size} devices from network and saved to cache.")
-            HomeyResult.Success(mappedDevices)
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception during getDevices: ${e.message}", e)
-            HomeyResult.Error(context.getString(R.string.repo_error_conn_failed, e.message ?: "Unknown error"))
+            // 2. Fetch from network if cache is missing, stale, or forced
+            val reason = when {
+                forceRefresh -> "Forced refresh"
+                _cachedHubId != currentHubId -> "Hub changed (${SanitizedHttpLogger.maskId(_cachedHubId)} -> ${SanitizedHttpLogger.maskId(currentHubId)})"
+                else -> "Cache empty"
+            }
+            Log.d(_TAG, "[DeviceRepository:getDevices] $reason. Fetching from network...")
+
+            val service = _buildService()
+            if (service == null) {
+                Log.e(_TAG, "[DeviceRepository:getDevices] Cannot fetch devices: HomeyApiService is null (check if Hub is configured).")
+                return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+            }
+
+            try {
+                val bundle = _fetchDevicesBundle(service)
+                val devicesResponse = bundle.devicesResponse
+                val zonesResponse = bundle.zonesResponse
+                val userResponse = bundle.userResponse
+
+                if (!devicesResponse.isSuccessful) {
+                    val errorBody = devicesResponse.errorBody()?.string()
+                    Log.e(_TAG, "[DeviceRepository:getDevices] Devices fetch failed: HTTP ${devicesResponse.code()} - $errorBody")
+                    if (devicesResponse.code() == 401 && !currentHubId.isNullOrBlank()) {
+                        storage.setReauthRequired(currentHubId, true, "EXPIRED")
+                    }
+                    return@withLock HomeyResult.Error(context.getString(R.string.repo_error_devices_http, devicesResponse.code()))
+                }
+                if (!zonesResponse.isSuccessful) {
+                    val errorBody = zonesResponse.errorBody()?.string()
+                    Log.e(_TAG, "[DeviceRepository:getDevices] Zones fetch failed: HTTP ${zonesResponse.code()} - $errorBody")
+                    if (zonesResponse.code() == 401 && !currentHubId.isNullOrBlank()) {
+                        storage.setReauthRequired(currentHubId, true, "EXPIRED")
+                    }
+                    return@withLock HomeyResult.Error(context.getString(R.string.repo_error_zones_http, zonesResponse.code()))
+                }
+
+                val devices = devicesResponse.body() ?: emptyMap()
+                val zones = zonesResponse.body() ?: emptyMap()
+                val favoritesList = if (userResponse?.isSuccessful == true) {
+                    userResponse.body()?.properties?.favoriteDevices ?: emptyList()
+                } else {
+                    emptyList()
+                }
+
+                val zoneIdToPath = zones.keys.associateWith { zId -> _buildZonePathName(zId, zones) }
+                _cachedZoneIdToPath = zoneIdToPath
+                _cachedZoneTemperatures = _computeZoneTemperatures(devices, zoneIdToPath)
+
+                val excludedIds = devices.values
+                    .flatMap { it.settings?.deviceIds ?: emptyList() }
+                    .toSet()
+
+                val globalZoneOrder = _computeGlobalZoneOrder(zones)
+
+                val mappedDevices = devices.values
+                    .filter { device -> _isSupportedDevice(device) }
+                    .map { device -> _toHomeyDevice(device, zones, favoritesList, excludedIds, globalZoneOrder) }
+                    .sortedBy { it.name }
+
+                // 3. Update cache
+                _cachedDevices = mappedDevices
+                _cachedHubId = currentHubId
+                _devicesFlow.value = mappedDevices
+                _lastSyncTimestamp = System.currentTimeMillis()
+
+                Log.d(_TAG, "[DeviceRepository:getDevices] Fetched ${mappedDevices.size} devices from network and saved to cache.")
+                HomeyResult.Success(mappedDevices)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(_TAG, "[DeviceRepository:getDevices] Exception: ${e.message}", e)
+                HomeyResult.Error(context.getString(R.string.repo_error_conn_failed, e.message ?: "Unknown error"))
+            }
         }
     }
 
     /**
      * Clears the in-memory device cache, forcing the next [getDevices] call to fetch from network.
      * Use this for manual refresh flows or after significant configuration changes.
+     *
+     * @public
+     * @example
+     * ```kotlin
+     * repo.invalidateCache()
+     * ```
      */
     fun invalidateCache() {
-        Log.d(TAG, "Device cache invalidated.")
-        cachedDevices = null
-        cachedHubId = null
-        cachedZoneTemperatures = emptyMap()
-        demoDevices = null
-        demoDevices2 = null
-        cachedHubDevices.clear()
+        Log.d(_TAG, "[DeviceRepository:invalidateCache] Device cache invalidated.")
+        _cachedDevices = null
+        _cachedHubId = null
+        _cachedZoneTemperatures = emptyMap()
+        _cachedZoneIdToPath = emptyMap()
+        _demoDevices = null
+        _demoDevices2 = null
+        _cachedHubDevices.clear()
+        _cachedInsightLogs = null
+        _cachedInsightLogsHubId = null
+        _cachedInsightLogsTimestampMs = 0L
+        _cachedInsightLogsServerDateMs = null
         _devicesFlow.value = emptyList()
         _hubDevicesFlow.value = emptyMap()
         _lastSyncTimestamp = 0L
@@ -221,9 +255,16 @@ class DeviceRepository(
 
     /**
      * Checks if the in-memory cache is currently empty.
+     *
+     * @public
+     * @return `true` if no devices are cached in memory.
+     * @example
+     * ```kotlin
+     * if (repo.isCacheEmpty()) { /* fetch devices */ }
+     * ```
      */
     fun isCacheEmpty(): Boolean {
-        return cachedDevices == null
+        return _cachedDevices == null
     }
 
     /**
@@ -233,55 +274,62 @@ class DeviceRepository(
      * @param hubId Target Homey ID or "demo".
      * @param forceRefresh Whether to force a network reload.
      * @return [HomeyResult] containing devices.
+     * @example
+     * ```kotlin
+     * val devices = repo.getDevicesForHub(hubId = "hub-id", forceRefresh = false)
+     * ```
      */
     suspend fun getDevicesForHub(
         hubId: String?,
         forceRefresh: Boolean = false
-    ): HomeyResult<List<HomeyDevice>> {
+    ): HomeyResult<List<HomeyDevice>> = withContext(Dispatchers.IO) {
         if (hubId.isNullOrBlank() || hubId == storage.getSelectedHomeyId()) {
-            return getDevices(forceRefresh)
+            return@withContext getDevices(forceRefresh)
         }
         if (hubId == "demo") {
-            return cacheMutex.withLock {
-                if (demoDevices == null || forceRefresh) {
-                    demoDevices = _createDemoDevices().toMutableList()
+            return@withContext _cacheMutex.withLock {
+                if (_demoDevices == null || forceRefresh) {
+                    _demoDevices = _createDemoDevices().toMutableList()
                 }
-                HomeyResult.Success(demoDevices!!.toList())
+                HomeyResult.Success(_demoDevices!!.toList())
             }
         }
         if (hubId == "demo_2") {
-            return cacheMutex.withLock {
-                if (demoDevices2 == null || forceRefresh) {
-                    demoDevices2 = _createDemoDevices2().toMutableList()
+            return@withContext _cacheMutex.withLock {
+                if (_demoDevices2 == null || forceRefresh) {
+                    _demoDevices2 = _createDemoDevices2().toMutableList()
                 }
-                HomeyResult.Success(demoDevices2!!.toList())
+                HomeyResult.Success(_demoDevices2!!.toList())
             }
         }
 
-        return cacheMutex.withLock {
-            if (!forceRefresh && cachedHubDevices.containsKey(hubId)) {
-                return@withLock HomeyResult.Success(cachedHubDevices[hubId]!!)
+        _cacheMutex.withLock {
+            if (!forceRefresh && _cachedHubDevices.containsKey(hubId)) {
+                return@withLock HomeyResult.Success(_cachedHubDevices[hubId]!!)
             }
 
-            val entry = storage.getHubToken(hubId)
-                ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-            val apiUrl = entry.apiUrl
-                ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-            val sessionToken = entry.sessionToken
+            val service = _buildServiceForHub(hubId)
                 ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
-            val service = HomeyApiClient.createForHub(apiUrl, sessionToken)
             try {
-                val devicesResponse = service.getDevices()
-                val zonesResponse = service.getZones()
-                val userResponse = service.getUserMe()
+                val bundle = _fetchDevicesBundle(service)
+                val devicesResponse = bundle.devicesResponse
+                val zonesResponse = bundle.zonesResponse
+                val userResponse = bundle.userResponse
 
                 if (!devicesResponse.isSuccessful) {
+                    if (devicesResponse.code() == 401) {
+                        storage.setReauthRequired(hubId, true, "EXPIRED")
+                    }
                     return@withLock HomeyResult.Error(context.getString(R.string.repo_error_devices_http, devicesResponse.code()))
                 }
                 val devices = devicesResponse.body() ?: emptyMap()
-                val zones = zonesResponse.body() ?: emptyMap()
-                val favoritesList = userResponse.body()?.properties?.favoriteDevices ?: emptyList()
+                val zones = if (zonesResponse.isSuccessful) zonesResponse.body() ?: emptyMap() else emptyMap()
+                val favoritesList = if (userResponse?.isSuccessful == true) {
+                    userResponse.body()?.properties?.favoriteDevices ?: emptyList()
+                } else {
+                    emptyList()
+                }
 
                 val excludedIds = devices.values
                     .flatMap { it.settings?.deviceIds ?: emptyList() }
@@ -293,14 +341,15 @@ class DeviceRepository(
                     .map { device -> _toHomeyDevice(device, zones, favoritesList, excludedIds, globalZoneOrder, targetHubId = hubId) }
                     .sortedBy { it.name }
 
-                cachedHubDevices[hubId] = mappedDevices
-                _hubDevicesFlow.value = cachedHubDevices.toMap()
+                _cachedHubDevices[hubId] = mappedDevices
+                _hubDevicesFlow.value = _cachedHubDevices.toMap()
                 if (hubId == storage.getSelectedHomeyId()) {
-                    cachedDevices = mappedDevices
+                    _cachedDevices = mappedDevices
                     _devicesFlow.value = mappedDevices
                 }
-                TileIconHelper.preloadDeviceIcons(context, mappedDevices, hubId)
                 HomeyResult.Success(mappedDevices)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 HomeyResult.Error(context.getString(R.string.repo_error_conn_failed, e.message ?: "Unknown error"))
             }
@@ -310,21 +359,33 @@ class DeviceRepository(
     /**
      * Toggles a device (door/light) by setting its primary capability.
      * Optionally routes to a specific [hubId] if provided.
+     *
+     * @public
+     * @param deviceId UUID of the target device.
+     * @param capabilityId Capability ID to update (e.g. `"onoff"`, `"locked"`, `"garagedoor_closed"`).
+     * @param makeActive Desired semantic active state (`true` = ON / unlocked / open).
+     * @param hubId Optional Homey Hub ID for multi-hub routing.
+     * @return [HomeyResult.Success] with localized confirmation message, or [HomeyResult.Error].
+     * @example
+     * ```kotlin
+     * val res = repo.toggleDeviceState("dev-uuid", "onoff", makeActive = true)
+     * ```
      */
     suspend fun toggleDeviceState(
         deviceId: String,
         capabilityId: String,
         makeActive: Boolean,
         hubId: String? = null
-    ): HomeyResult<String> {
+    ): HomeyResult<String> = withContext(Dispatchers.IO) {
+        val maskedDeviceId = SanitizedHttpLogger.maskId(deviceId)
         // Handle Demo Mode optimistic state toggle
         if (storage.isDemoMode() || hubId?.startsWith("demo") == true) {
-            return cacheMutex.withLock {
+            return@withContext _cacheMutex.withLock {
                 val isSecondDemo = hubId == "demo_2"
                 val list = if (isSecondDemo) {
-                    demoDevices2 ?: _createDemoDevices2().toMutableList()
+                    _demoDevices2 ?: _createDemoDevices2().toMutableList()
                 } else {
-                    demoDevices ?: _createDemoDevices().toMutableList()
+                    _demoDevices ?: _createDemoDevices().toMutableList()
                 }
                 val index = list.indexOfFirst { it.id == deviceId }
                 if (index != -1) {
@@ -332,45 +393,30 @@ class DeviceRepository(
                     val newActive = if (isBtn) false else makeActive
                     list[index] = list[index].copy(isActive = newActive)
                     if (isSecondDemo) {
-                        demoDevices2 = list
+                        _demoDevices2 = list
                     } else {
-                        demoDevices = list
+                        _demoDevices = list
                         _devicesFlow.value = list.toList()
                     }
-                    Log.d(TAG, "[DeviceRepository:toggleDeviceState] Toggled demo device $deviceId to isActive=$newActive on hub=$hubId")
-                }
-                try {
-                    com.dimapp.android.homeywatch.tile.TileSlotManager.updateAllSlots(context)
-                } catch (e: Exception) {
-                    Log.w(TAG, "[DeviceRepository:toggleDeviceState] Failed to notify TileSlotManager in demo: ${e.message}")
+                    Log.d(_TAG, "[DeviceRepository:toggleDeviceState] Toggled demo device $maskedDeviceId to isActive=$newActive on hub=${SanitizedHttpLogger.maskId(hubId)}")
                 }
                 HomeyResult.Success(context.getString(R.string.repo_success_toggle))
             }
         }
 
-        val service = if (!hubId.isNullOrBlank() && hubId != storage.getSelectedHomeyId()) {
-            val entry = storage.getHubToken(hubId)
-            val apiUrl = entry?.apiUrl
-            val token = entry?.sessionToken
-            if (apiUrl != null && token != null) {
-                HomeyApiClient.createForHub(apiUrl, token)
-            } else {
-                _buildService()
-            }
-        } else {
-            _buildService()
-        } ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+        val service = _buildServiceForHub(hubId)
+            ?: return@withContext HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
         val isButtonOrAction = isButtonOrActionCapability(capabilityId)
         val value: Any = when {
             isButtonOrAction         -> true
-            capabilityId == CAP_GARAGEDOOR           -> !makeActive  
-            capabilityId == "locked"                 -> !makeActive  
+            capabilityId == CAP_GARAGEDOOR           -> !makeActive
+            capabilityId == "locked"                 -> !makeActive
             capabilityId == "windowcoverings_closed" -> !makeActive
-            else                                     -> makeActive   
+            else                                     -> makeActive
         }
 
-        return try {
+        try {
             val response = service.setCapability(
                 deviceId = deviceId,
                 capabilityId = capabilityId,
@@ -379,8 +425,8 @@ class DeviceRepository(
 
             if (response.isSuccessful) {
                 val nextActive = if (isButtonOrAction) false else makeActive
-                cacheMutex.withLock {
-                    cachedDevices = cachedDevices?.map { dev ->
+                _cacheMutex.withLock {
+                    _cachedDevices = _cachedDevices?.map { dev ->
                         if (dev.id == deviceId) {
                             val updatedRaw = dev.rawCapabilities.toMutableMap()
                             updatedRaw[capabilityId] = value
@@ -392,10 +438,10 @@ class DeviceRepository(
                             dev
                         }
                     }
-                    cachedDevices?.let { _devicesFlow.value = it }
+                    _cachedDevices?.let { _devicesFlow.value = it }
 
-                    if (!hubId.isNullOrBlank() && cachedHubDevices.containsKey(hubId)) {
-                        cachedHubDevices[hubId] = cachedHubDevices[hubId]!!.map { dev ->
+                    if (!hubId.isNullOrBlank() && _cachedHubDevices.containsKey(hubId)) {
+                        _cachedHubDevices[hubId] = _cachedHubDevices[hubId]!!.map { dev ->
                             if (dev.id == deviceId) {
                                 val updatedRaw = dev.rawCapabilities.toMutableMap()
                                 updatedRaw[capabilityId] = value
@@ -407,40 +453,123 @@ class DeviceRepository(
                                 dev
                             }
                         }
-                        _hubDevicesFlow.value = cachedHubDevices.toMap()
+                        _hubDevicesFlow.value = _cachedHubDevices.toMap()
                     }
                 }
-                try {
-                    com.dimapp.android.homeywatch.tile.TileSlotManager.updateAllSlots(context)
-                } catch (e: Exception) {
-                    Log.w(TAG, "[DeviceRepository:toggleDeviceState] Failed to notify TileSlotManager: ${e.message}")
-                }
-                Log.d(TAG, "[DeviceRepository:toggleDeviceState] Successfully toggled $deviceId ($capabilityId) to $value")
+                Log.d(_TAG, "[DeviceRepository:toggleDeviceState] Successfully toggled $maskedDeviceId ($capabilityId) to $value")
                 HomeyResult.Success(context.getString(R.string.repo_success_toggle))
             } else {
                 HomeyResult.Error(context.getString(R.string.repo_error_toggle_http, response.code()))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             HomeyResult.Error(context.getString(R.string.repo_error_network, e.message ?: "Unknown error"))
         }
     }
 
     /**
+     * Reads the current state of a single device on Homey and immediately toggles the target
+     * capability to its opposite state. Designed for stateless Wear OS Tiles so switches invert
+     * the actual hardware state on the first press without background polling.
+     *
+     * @public
+     * @param deviceId UUID of the device to toggle.
+     * @param capabilityId Target capability ID (e.g. "onoff", "locked", "garagedoor_closed").
+     * @param fallbackIsActive Fallback active flag used when the live pre-read fails or times out.
+     * @param hubId Optional target Homey hub ID for multi-hub routing.
+     * @return [HomeyResult.Success] containing the resulting active state after actuation, or [HomeyResult.Error].
+     * @example
+     * val result = deviceRepo.smartToggleDevice("dev-uuid", "onoff", false, "hub-id")
+     */
+    suspend fun smartToggleDevice(
+        deviceId: String,
+        capabilityId: String,
+        fallbackIsActive: Boolean,
+        hubId: String? = null
+    ): HomeyResult<Boolean> = withContext(Dispatchers.IO) {
+        val maskedDeviceId = SanitizedHttpLogger.maskId(deviceId)
+        if (isButtonOrActionCapability(capabilityId)) {
+            return@withContext when (val res = toggleDeviceState(deviceId, capabilityId, makeActive = true, hubId = hubId)) {
+                is HomeyResult.Success -> HomeyResult.Success(false)
+                is HomeyResult.Error -> HomeyResult.Error(res.message)
+            }
+        }
+
+        if (storage.isDemoMode() || hubId?.startsWith("demo") == true) {
+            val currentActive = _cacheMutex.withLock {
+                val isSecondDemo = hubId == "demo_2"
+                val list = if (isSecondDemo) {
+                    _demoDevices2 ?: _createDemoDevices2().toMutableList().also { _demoDevices2 = it }
+                } else {
+                    _demoDevices ?: _createDemoDevices().toMutableList().also { _demoDevices = it }
+                }
+                list.find { it.id == deviceId }?.let { dev ->
+                    val rawVal = dev.rawCapabilities[capabilityId]
+                    if (rawVal != null) isCapabilityActive(capabilityId, rawVal) else dev.isActive
+                } ?: fallbackIsActive
+            }
+            val targetActive = !currentActive
+            return@withContext when (val res = toggleDeviceState(deviceId, capabilityId, makeActive = targetActive, hubId = hubId)) {
+                is HomeyResult.Success -> HomeyResult.Success(targetActive)
+                is HomeyResult.Error -> HomeyResult.Error(res.message)
+            }
+        }
+
+        val service = _buildServiceForHub(hubId)
+            ?: return@withContext HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+
+        var currentActive = fallbackIsActive
+        try {
+            val preReadResponse = withTimeoutOrNull(2500L) {
+                service.getDevice(deviceId)
+            }
+            if (preReadResponse != null && preReadResponse.isSuccessful) {
+                val caps = preReadResponse.body()?.capabilitiesObj
+                if (caps != null && caps.containsKey(capabilityId)) {
+                    currentActive = isCapabilityActive(capabilityId, caps[capabilityId]?.value)
+                    Log.d(_TAG, "[DeviceRepository:smartToggleDevice] Live pre-read for $maskedDeviceId ($capabilityId): currentActive=$currentActive")
+                } else {
+                    Log.w(_TAG, "[DeviceRepository:smartToggleDevice] Capability $capabilityId absent for $maskedDeviceId; using fallback=$fallbackIsActive")
+                }
+            } else {
+                Log.w(_TAG, "[DeviceRepository:smartToggleDevice] Live pre-read failed or timed out for $maskedDeviceId (code=${preReadResponse?.code()}); using fallback=$fallbackIsActive")
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(_TAG, "[DeviceRepository:smartToggleDevice] Live pre-read error for $maskedDeviceId: ${e.message}; using fallback=$fallbackIsActive")
+        }
+
+        val targetActive = !currentActive
+        when (val toggleRes = toggleDeviceState(deviceId, capabilityId, makeActive = targetActive, hubId = hubId)) {
+            is HomeyResult.Success -> HomeyResult.Success(targetActive)
+            is HomeyResult.Error -> HomeyResult.Error(toggleRes.message)
+        }
+    }
+
+    /**
      * Sets an arbitrary capability value (e.g. dim, target_temperature, light_hue) on a device.
      *
+     * @public
      * @param deviceId Device UUID.
      * @param capabilityId Capability ID to update.
      * @param value The value to apply (Number, Boolean, or String).
      * @return [HomeyResult] indicating success or failure.
+     * @example
+     * ```kotlin
+     * val res = repo.setDeviceCapabilityValue("dev-uuid", "dim", 0.5)
+     * ```
      */
     suspend fun setDeviceCapabilityValue(
         deviceId: String,
         capabilityId: String,
         value: Any
-    ): HomeyResult<String> {
+    ): HomeyResult<String> = withContext(Dispatchers.IO) {
+        val maskedDeviceId = SanitizedHttpLogger.maskId(deviceId)
         // Handle Demo Mode state mutation
         if (storage.isDemoMode()) {
-            val list = demoDevices ?: _createDemoDevices().toMutableList()
+            val list = _demoDevices ?: _createDemoDevices().toMutableList()
             val index = list.indexOfFirst { it.id == deviceId }
             if (index != -1) {
                 val current = list[index]
@@ -461,21 +590,16 @@ class DeviceRepository(
                     else -> current.copy(rawCapabilities = updatedRaw)
                 }
                 list[index] = updated
-                demoDevices = list
+                _demoDevices = list
                 _devicesFlow.value = list.toList()
-                Log.d(TAG, "Updated demo device $deviceId capability $capabilityId to $value")
+                Log.d(_TAG, "[DeviceRepository:setDeviceCapabilityValue] Updated demo device $maskedDeviceId capability $capabilityId to $value")
             }
-            try {
-                com.dimapp.android.homeywatch.tile.TileSlotManager.updateAllSlots(context)
-            } catch (e: Exception) {
-                Log.w(TAG, "[DeviceRepository:setDeviceCapabilityValue] Failed to notify TileSlotManager in demo: ${e.message}")
-            }
-            return HomeyResult.Success(context.getString(R.string.repo_success_toggle))
+            return@withContext HomeyResult.Success(context.getString(R.string.repo_success_toggle))
         }
 
-        val service = _buildService() ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+        val service = _buildService() ?: return@withContext HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
-        return try {
+        try {
             val response = service.setCapability(
                 deviceId = deviceId,
                 capabilityId = capabilityId,
@@ -483,8 +607,8 @@ class DeviceRepository(
             )
 
             if (response.isSuccessful) {
-                cacheMutex.withLock {
-                    cachedDevices = cachedDevices?.map { dev ->
+                _cacheMutex.withLock {
+                    _cachedDevices = _cachedDevices?.map { dev ->
                         if (dev.id == deviceId) {
                             val updatedRaw = dev.rawCapabilities.toMutableMap()
                             updatedRaw[capabilityId] = value
@@ -506,17 +630,14 @@ class DeviceRepository(
                             dev
                         }
                     }
-                    cachedDevices?.let { _devicesFlow.value = it }
-                }
-                try {
-                    com.dimapp.android.homeywatch.tile.TileSlotManager.updateAllSlots(context)
-                } catch (e: Exception) {
-                    Log.w(TAG, "[DeviceRepository:setDeviceCapabilityValue] Failed to notify TileSlotManager: ${e.message}")
+                    _cachedDevices?.let { _devicesFlow.value = it }
                 }
                 HomeyResult.Success(context.getString(R.string.repo_success_toggle))
             } else {
                 HomeyResult.Error(context.getString(R.string.repo_error_toggle_http, response.code()))
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             HomeyResult.Error(context.getString(R.string.repo_error_network, e.message ?: "Unknown error"))
         }
@@ -535,16 +656,16 @@ class DeviceRepository(
     suspend fun syncDeviceStates(
         currentDevices: List<HomeyDevice>,
         hubId: String? = null
-    ): HomeyResult<List<HomeyDevice>> {
-        if (currentDevices.isEmpty()) return HomeyResult.Success(emptyList())
+    ): HomeyResult<List<HomeyDevice>> = withContext(Dispatchers.IO) {
+        if (currentDevices.isEmpty()) return@withContext HomeyResult.Success(emptyList())
 
         if (storage.isDemoMode() || hubId?.startsWith("demo") == true) {
             val isSecondDemo = hubId == "demo_2"
-            return cacheMutex.withLock {
+            return@withContext _cacheMutex.withLock {
                 val list = if (isSecondDemo) {
-                    demoDevices2 ?: currentDevices
+                    _demoDevices2 ?: currentDevices
                 } else {
-                    demoDevices ?: currentDevices
+                    _demoDevices ?: currentDevices
                 }
                 _lastSyncTimestamp = System.currentTimeMillis()
                 if (!isSecondDemo) {
@@ -557,99 +678,53 @@ class DeviceRepository(
         val targetHubId = if (!hubId.isNullOrBlank()) hubId else storage.getSelectedHomeyId()
         val isDifferentHub = !targetHubId.isNullOrBlank() && targetHubId != storage.getSelectedHomeyId()
 
-        val service = if (isDifferentHub) {
-            val entry = storage.getHubToken(targetHubId!!)
-            val apiUrl = entry?.apiUrl
-            val token = entry?.sessionToken
-            if (apiUrl != null && token != null) {
-                HomeyApiClient.createForHub(apiUrl, token)
-            } else {
-                _buildService()
-            }
-        } else {
-            _buildService()
-        } ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+        val service = _buildServiceForHub(targetHubId)
+            ?: return@withContext HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
-        return try {
+        try {
             val response = service.getDevices()
             if (!response.isSuccessful) {
-                Log.e(TAG, "[DeviceRepository:syncDeviceStates] Batch sync failed: HTTP ${response.code()} for hub=$targetHubId")
-                return HomeyResult.Error(context.getString(R.string.repo_error_devices_http, response.code()))
+                Log.e(_TAG, "[DeviceRepository:syncDeviceStates] Batch sync failed: HTTP ${response.code()} for hub=${SanitizedHttpLogger.maskId(targetHubId)}")
+                return@withContext HomeyResult.Error(context.getString(R.string.repo_error_devices_http, response.code()))
             }
 
             val remoteDevices = response.body() ?: emptyMap()
             val updatedDevices = currentDevices.map { device ->
                 val remoteDto = remoteDevices[device.id]
                 if (remoteDto != null) {
-                    val caps = remoteDto.capabilitiesObj ?: emptyMap()
-                    val rawCaps = caps.mapValues { it.value.value }
-                    val rawValue = caps[device.primaryCapability]?.value
-                    val newIsActive = isCapabilityActive(device.primaryCapability, rawValue)
-                    val newIsAvailable = remoteDto.available != false
-
-                    val dimVal = (caps[CAP_DIM]?.value as? Number)?.toDouble() ?: device.dimValue
-                    val targetTemp = (caps[CAP_TARGET_TEMPERATURE]?.value as? Number)?.toDouble() ?: device.targetTemperature
-                    val devTemp = (caps[CAP_MEASURE_TEMPERATURE]?.value as? Number)?.toDouble() ?: device.temperature
-                    val hue = (caps[CAP_LIGHT_HUE]?.value as? Number)?.toDouble() ?: device.lightHue
-                    val sat = (caps[CAP_LIGHT_SATURATION]?.value as? Number)?.toDouble() ?: device.lightSaturation
-                    val colorTemp = (caps[CAP_LIGHT_TEMPERATURE]?.value as? Number)?.toDouble() ?: device.lightTemperature
-                    val capMeta = _parseCapabilitiesMetadata(caps).ifEmpty { device.capabilitiesMetadata }
-
-                    val resolvedIconUrl = if (!remoteDto.iconOverride.isNullOrBlank()) {
-                        "https://my.homey.app/img/devices/${remoteDto.iconOverride}.svg"
-                    } else if (!remoteDto.iconObj?.url.isNullOrBlank()) {
-                        val raw = remoteDto.iconObj.url
-                        val hub = targetHubId ?: storage.getSelectedHomeyId()
-                        if (raw.startsWith("http")) raw else {
-                            val path = if (raw.startsWith("/")) raw else "/$raw"
-                            "https://$hub.connect.athom.com$path"
-                        }
-                    } else {
-                        device.iconUrl
-                    }
-
-                    device.copy(
-                        isActive = newIsActive,
-                        isAvailable = newIsAvailable,
-                        dimValue = dimVal,
-                        targetTemperature = targetTemp,
-                        currentTemperature = devTemp,
-                        temperature = devTemp,
-                        lightHue = hue,
-                        lightSaturation = sat,
-                        lightTemperature = colorTemp,
-                        rawCapabilities = rawCaps,
-                        capabilitiesMetadata = capMeta,
-                        iconUrl = resolvedIconUrl
-                    )
+                    _mergeLiveDeviceDto(device, remoteDto, targetHubId)
                 } else {
                     device
                 }
             }
 
-            cacheMutex.withLock {
+            _cacheMutex.withLock {
                 val updatedMap = updatedDevices.associateBy { it.id }
                 if (isDifferentHub) {
-                    val updatedHub = cachedHubDevices[targetHubId!!]?.map { dev ->
+                    val updatedHub = _cachedHubDevices[targetHubId!!]?.map { dev ->
                         updatedMap[dev.id] ?: dev
                     } ?: updatedDevices
-                    cachedHubDevices[targetHubId!!] = updatedHub
-                    _hubDevicesFlow.value = cachedHubDevices.toMap()
+                    _cachedHubDevices[targetHubId!!] = updatedHub
+                    _hubDevicesFlow.value = _cachedHubDevices.toMap()
                 } else {
-                    val updatedMain = cachedDevices?.map { dev ->
+                    if (_cachedZoneIdToPath.isNotEmpty()) {
+                        _cachedZoneTemperatures = _computeZoneTemperatures(remoteDevices, _cachedZoneIdToPath)
+                    }
+                    val updatedMain = _cachedDevices?.map { dev ->
                         updatedMap[dev.id] ?: dev
                     } ?: updatedDevices
-                    cachedDevices = updatedMain
+                    _cachedDevices = updatedMain
                     _devicesFlow.value = updatedMain
                 }
             }
 
             _lastSyncTimestamp = System.currentTimeMillis()
-            Log.d(TAG, "[DeviceRepository:syncDeviceStates] Successfully synced ${updatedDevices.size} devices via single batch call for hub=$targetHubId.")
-            TileIconHelper.preloadDeviceIcons(context, updatedDevices, targetHubId)
+            Log.d(_TAG, "[DeviceRepository:syncDeviceStates] Successfully synced ${updatedDevices.size} devices via single batch call for hub=${SanitizedHttpLogger.maskId(targetHubId)}.")
             HomeyResult.Success(updatedDevices)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "[DeviceRepository:syncDeviceStates] Batch sync exception: ${e.message}")
+            Log.e(_TAG, "[DeviceRepository:syncDeviceStates] Batch sync exception: ${e.message}")
             HomeyResult.Error(context.getString(R.string.repo_error_sync_failed, e.message ?: "Unknown error"))
         }
     }
@@ -661,73 +736,53 @@ class DeviceRepository(
      * @param deviceId UUID of the device to refresh.
      * @return [HomeyResult] containing the refreshed [HomeyDevice].
      * @example
+     * ```kotlin
      * val result = repo.refreshSingleDevice("device-id")
+     * ```
      */
-    suspend fun refreshSingleDevice(deviceId: String): HomeyResult<HomeyDevice> {
+    suspend fun refreshSingleDevice(deviceId: String): HomeyResult<HomeyDevice> = withContext(Dispatchers.IO) {
+        val maskedDeviceId = SanitizedHttpLogger.maskId(deviceId)
         if (storage.isDemoMode()) {
-            val dev = (demoDevices ?: cachedDevices)?.find { it.id == deviceId }
-            return if (dev != null) HomeyResult.Success(dev) else HomeyResult.Error("Device not found in demo mode")
+            val dev = (_demoDevices ?: _cachedDevices)?.find { it.id == deviceId }
+            return@withContext if (dev != null) HomeyResult.Success(dev) else HomeyResult.Error("Device not found in demo mode")
         }
 
-        val service = _buildService() ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+        val service = _buildService() ?: return@withContext HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
-        return try {
+        try {
             val response = service.getDevice(deviceId)
             if (!response.isSuccessful) {
-                Log.e(TAG, "[DeviceRepository:refreshSingleDevice] Failed: HTTP ${response.code()} for device=$deviceId")
-                return HomeyResult.Error(context.getString(R.string.repo_error_devices_http, response.code()))
+                Log.e(_TAG, "[DeviceRepository:refreshSingleDevice] Failed: HTTP ${response.code()} for device=$maskedDeviceId")
+                return@withContext HomeyResult.Error(context.getString(R.string.repo_error_devices_http, response.code()))
             }
 
             val remoteDto = response.body()
-                ?: return HomeyResult.Error(context.getString(R.string.repo_error_devices_http, response.code()))
+                ?: return@withContext HomeyResult.Error(context.getString(R.string.repo_error_devices_http, response.code()))
 
             var updatedDevice: HomeyDevice? = null
-            cacheMutex.withLock {
-                val currentList = cachedDevices ?: emptyList()
+            val activeHubId = storage.getSelectedHomeyId()
+            _cacheMutex.withLock {
+                val currentList = _cachedDevices ?: emptyList()
                 val existing = currentList.find { it.id == deviceId }
                 if (existing != null) {
-                    val caps = remoteDto.capabilitiesObj ?: emptyMap()
-                    val rawCaps = caps.mapValues { it.value.value }
-                    val rawValue = caps[existing.primaryCapability]?.value
-                    val newIsActive = isCapabilityActive(existing.primaryCapability, rawValue)
-                    val newIsAvailable = remoteDto.available != false
-
-                    val dimVal = (caps[CAP_DIM]?.value as? Number)?.toDouble() ?: existing.dimValue
-                    val targetTemp = (caps[CAP_TARGET_TEMPERATURE]?.value as? Number)?.toDouble() ?: existing.targetTemperature
-                    val devTemp = (caps[CAP_MEASURE_TEMPERATURE]?.value as? Number)?.toDouble() ?: existing.temperature
-                    val hue = (caps[CAP_LIGHT_HUE]?.value as? Number)?.toDouble() ?: existing.lightHue
-                    val sat = (caps[CAP_LIGHT_SATURATION]?.value as? Number)?.toDouble() ?: existing.lightSaturation
-                    val colorTemp = (caps[CAP_LIGHT_TEMPERATURE]?.value as? Number)?.toDouble() ?: existing.lightTemperature
-                    val capMeta = _parseCapabilitiesMetadata(caps).ifEmpty { existing.capabilitiesMetadata }
-
-                    val updated = existing.copy(
-                        isActive = newIsActive,
-                        isAvailable = newIsAvailable,
-                        dimValue = dimVal,
-                        targetTemperature = targetTemp,
-                        currentTemperature = devTemp,
-                        temperature = devTemp,
-                        lightHue = hue,
-                        lightSaturation = sat,
-                        lightTemperature = colorTemp,
-                        rawCapabilities = rawCaps,
-                        capabilitiesMetadata = capMeta
-                    )
+                    val updated = _mergeLiveDeviceDto(existing, remoteDto, activeHubId)
                     updatedDevice = updated
                     val newList = currentList.map { if (it.id == deviceId) updated else it }
-                    cachedDevices = newList
+                    _cachedDevices = newList
                     _devicesFlow.value = newList
                 }
             }
 
             if (updatedDevice != null) {
-                Log.d(TAG, "[DeviceRepository:refreshSingleDevice] Successfully refreshed state for $deviceId")
+                Log.d(_TAG, "[DeviceRepository:refreshSingleDevice] Successfully refreshed state for $maskedDeviceId")
                 HomeyResult.Success(updatedDevice!!)
             } else {
-                HomeyResult.Error("Device $deviceId not found in cache")
+                HomeyResult.Error("Device $maskedDeviceId not found in cache")
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "[DeviceRepository:refreshSingleDevice] Exception: ${e.message}", e)
+            Log.e(_TAG, "[DeviceRepository:refreshSingleDevice] Exception: ${e.message}", e)
             HomeyResult.Error(context.getString(R.string.repo_error_network, e.message ?: "Unknown error"))
         }
     }
@@ -742,7 +797,7 @@ class DeviceRepository(
      * @example
      * val history = repo.getDeviceStateHistory("device-id")
      */
-    suspend fun getDeviceStateHistory(deviceId: String): HomeyResult<List<DeviceHistoryEvent>> {
+    suspend fun getDeviceStateHistory(deviceId: String): HomeyResult<List<DeviceHistoryEvent>> = withContext(Dispatchers.IO) {
         if (storage.isDemoMode()) {
             val now = System.currentTimeMillis()
             val demoEvents = listOf(
@@ -772,52 +827,23 @@ class DeviceRepository(
                     stateText = context.getString(R.string.device_history_turned_off)
                 )
             )
-            return HomeyResult.Success(demoEvents)
+            return@withContext HomeyResult.Success(demoEvents)
         }
 
-        val service = _buildService() ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+        val maskedDeviceId = SanitizedHttpLogger.maskId(deviceId)
+        val service = _buildService() ?: return@withContext HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
-        return try {
-            val logsResponse = service.getInsightsLogs()
-            if (!logsResponse.isSuccessful) {
-                Log.e(TAG, "[DeviceRepository:getDeviceStateHistory] Failed to get insight logs: HTTP ${logsResponse.code()} - ${logsResponse.errorBody()?.string()}")
-                return HomeyResult.Error(context.getString(R.string.recap_error_history))
+        try {
+            val logsResult = _getInsightLogsForActiveHub(service)
+            val (logList, logsServerDateMs) = when (logsResult) {
+                is HomeyResult.Success -> logsResult.data
+                is HomeyResult.Error -> return@withContext HomeyResult.Error(logsResult.message)
             }
 
-            val rootLogsJson = logsResponse.body()
-            val logList = mutableListOf<InsightLogDto>()
-            val gson = Gson()
-
-            if (rootLogsJson != null) {
-                if (rootLogsJson.isJsonArray) {
-                    for (elem in rootLogsJson.asJsonArray) {
-                        if (elem.isJsonObject) {
-                            try {
-                                val log = gson.fromJson(elem, InsightLogDto::class.java)
-                                if (log != null) logList.add(log)
-                            } catch (e: Exception) {
-                                Log.w(TAG, "[DeviceRepository:getDeviceStateHistory] Failed to parse log element: ${e.message}")
-                            }
-                        }
-                    }
-                } else if (rootLogsJson.isJsonObject) {
-                    for ((key, elem) in rootLogsJson.asJsonObject.entrySet()) {
-                        if (elem.isJsonObject) {
-                            try {
-                                val log = gson.fromJson(elem, InsightLogDto::class.java)
-                                if (log != null) {
-                                    val resolvedLog = if (log.id.isNullOrBlank()) log.copy(id = key) else log
-                                    logList.add(resolvedLog)
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "[DeviceRepository:getDeviceStateHistory] Failed to parse log entry: ${e.message}")
-                            }
-                        }
-                    }
-                }
+            val cachedDevice = _cacheMutex.withLock {
+                _cachedDevices?.firstOrNull { it.id == deviceId }
+                    ?: _cachedHubDevices.values.asSequence().flatten().firstOrNull { it.id == deviceId }
             }
-
-            Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] Retrieved ${logList.size} insight logs. Searching for device $deviceId")
 
             val deviceTargetUri = "homey:device:$deviceId"
             val deviceLogs = logList.filter { log ->
@@ -827,21 +853,13 @@ class DeviceRepository(
                     log.uri?.contains(deviceId, ignoreCase = true) == true ||
                     log.id?.contains(deviceId, ignoreCase = true) == true
             }
-            Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] Found ${deviceLogs.size} logs for device $deviceId: ${deviceLogs.map { it.id }}")
+            Log.d(_TAG, "[DeviceRepository:getDeviceStateHistory] Found ${deviceLogs.size} logs for device $maskedDeviceId: ${deviceLogs.map { it.id?.substringAfterLast(":") }}")
 
-            val targetLog = deviceLogs.firstOrNull { log ->
-                val idStr = log.id ?: ""
-                idStr.equals(CAP_ONOFF, ignoreCase = true) ||
-                    idStr.endsWith(":$CAP_ONOFF", ignoreCase = true) ||
-                    idStr.endsWith(".$CAP_ONOFF", ignoreCase = true)
-            } ?: deviceLogs.firstOrNull { log ->
-                val idStr = log.id ?: ""
-                !idStr.contains(CAP_DIM, ignoreCase = true)
-            } ?: deviceLogs.firstOrNull()
+            val targetLog = _selectPrimaryHistoryLog(deviceLogs, cachedDevice)
 
             if (targetLog == null) {
-                Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] No matching insights log found for device $deviceId")
-                return HomeyResult.Success(emptyList())
+                Log.d(_TAG, "[DeviceRepository:getDeviceStateHistory] No matching insights log found for device $maskedDeviceId")
+                return@withContext HomeyResult.Success(emptyList())
             }
 
             val ownerUri = targetLog.ownerUri?.takeIf { it.isNotBlank() }
@@ -850,72 +868,357 @@ class DeviceRepository(
             val rawId = targetLog.id?.takeIf { it.isNotBlank() } ?: CAP_ONOFF
             val shortId = rawId.substringAfterLast(":")
 
-            Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] Target log found. ownerUri=$ownerUri, rawId=$rawId, shortId=$shortId, title=${targetLog.title}")
+            Log.d(
+                _TAG,
+                "[DeviceRepository:getDeviceStateHistory] Target log selected. device=$maskedDeviceId, shortId=$shortId, type=${targetLog.type}, hasTitleTrue=${!targetLog.titleTrue.isNullOrBlank()}, hasTitleFalse=${!targetLog.titleFalse.isNullOrBlank()}"
+            )
 
             // Attempt 1: Using ownerUri and rawId
             var entriesResponse = service.getInsightEntries(uri = ownerUri, logId = rawId, resolution = "last7Days")
             if (!entriesResponse.isSuccessful && shortId != rawId) {
-                Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] First attempt HTTP ${entriesResponse.code()}. Retrying with shortId=$shortId")
+                Log.d(_TAG, "[DeviceRepository:getDeviceStateHistory] First attempt HTTP ${entriesResponse.code()}. Retrying with shortId=$shortId")
                 entriesResponse = service.getInsightEntries(uri = ownerUri, logId = shortId, resolution = "last7Days")
             }
             if (!entriesResponse.isSuccessful) {
-                Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] Retrying with deviceId=$deviceId and logId=$shortId")
+                Log.d(_TAG, "[DeviceRepository:getDeviceStateHistory] Retrying with device=$maskedDeviceId and logId=$shortId")
                 entriesResponse = service.getInsightEntries(uri = deviceId, logId = shortId, resolution = "last7Days")
             }
 
             if (!entriesResponse.isSuccessful) {
-                Log.e(TAG, "[DeviceRepository:getDeviceStateHistory] Failed to get insight entries: HTTP ${entriesResponse.code()} - ${entriesResponse.errorBody()?.string()}")
-                return HomeyResult.Error(context.getString(R.string.recap_error_history))
+                Log.e(_TAG, "[DeviceRepository:getDeviceStateHistory] Failed to get insight entries: HTTP ${entriesResponse.code()} - ${entriesResponse.errorBody()?.string()}")
+                return@withContext HomeyResult.Error(context.getString(R.string.recap_error_history))
+            }
+
+            val serverDateMs = entriesResponse.headers().getDate("Date")?.time ?: logsServerDateMs
+            val serverClockOffsetMs = if (serverDateMs != null) {
+                serverDateMs - System.currentTimeMillis()
+            } else {
+                0L
             }
 
             val rootJson = entriesResponse.body()
-            Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] Insight entries response received: $rootJson")
-
-            val pointsJson = when {
-                rootJson == null -> null
-                rootJson.isJsonArray -> rootJson.asJsonArray
-                rootJson.isJsonObject && rootJson.asJsonObject.has("values") && rootJson.asJsonObject.get("values").isJsonArray -> {
-                    rootJson.asJsonObject.getAsJsonArray("values")
-                }
-                else -> null
-            }
+            val pointsJson = _extractInsightPointsJson(rootJson)
+            Log.d(_TAG, "[DeviceRepository:getDeviceStateHistory] Insight entries parsed: ${pointsJson?.size() ?: 0} raw points for $maskedDeviceId")
 
             if (pointsJson == null || pointsJson.size() == 0) {
-                Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] No historical data points found for $deviceId")
-                return HomeyResult.Success(emptyList())
+                Log.d(_TAG, "[DeviceRepository:getDeviceStateHistory] No historical data points found for $maskedDeviceId")
+                return@withContext HomeyResult.Success(emptyList())
             }
 
             val events = mutableListOf<DeviceHistoryEvent>()
-            var previousState: Boolean? = null
+            val baseCap = shortId.substringBefore(".")
+            val isNumericDimLog = targetLog.type.equals("number", ignoreCase = true) &&
+                baseCap.equals(CAP_DIM, ignoreCase = true)
 
-            for (elem in pointsJson) {
-                if (!elem.isJsonObject) continue
-                val obj = elem.asJsonObject
-                val ts = _parseIsoOrEpochTimestamp(obj.get("t")) ?: continue
-                val boolVal = _parseInsightValueToBoolean(obj.get("v")) ?: continue
+            if (isNumericDimLog) {
+                val parsedPoints = pointsJson.mapNotNull { elem ->
+                    if (!elem.isJsonObject) return@mapNotNull null
+                    val obj = elem.asJsonObject
+                    val ts = _parseIsoOrEpochTimestamp(obj.get("t")) ?: return@mapNotNull null
+                    val numVal = _parseInsightValueToDouble(obj.get("v")) ?: return@mapNotNull null
+                    ts to kotlin.math.round(numVal * 100.0).toInt().coerceIn(0, 100)
+                }.sortedBy { it.first }
 
-                if (previousState == null || previousState != boolVal) {
-                    val text = if (boolVal) {
-                        context.getString(R.string.device_history_turned_on)
-                    } else {
-                        context.getString(R.string.device_history_turned_off)
+                var previousPct: Int? = null
+                for ((ts, pct) in parsedPoints) {
+                    if (previousPct == null || previousPct != pct) {
+                        val stateText = if (pct == 0) {
+                            context.getString(R.string.device_history_turned_off)
+                        } else {
+                            context.getString(R.string.device_history_dimmed, pct)
+                        }
+                        events.add(
+                            DeviceHistoryEvent(
+                                timestamp = ts,
+                                isOn = pct > 0,
+                                stateText = stateText,
+                                serverClockOffsetMs = serverClockOffsetMs
+                            )
+                        )
+                        previousPct = pct
                     }
-                    events.add(DeviceHistoryEvent(timestamp = ts, isOn = boolVal, stateText = text))
-                    previousState = boolVal
+                }
+            } else {
+                val parsedPoints = pointsJson.mapNotNull { elem ->
+                    if (!elem.isJsonObject) return@mapNotNull null
+                    val obj = elem.asJsonObject
+                    val ts = _parseIsoOrEpochTimestamp(obj.get("t")) ?: return@mapNotNull null
+                    val boolVal = _parseInsightValueToBoolean(obj.get("v")) ?: return@mapNotNull null
+                    ts to boolVal
+                }.sortedBy { it.first }
+
+                var previousState: Boolean? = null
+                for ((ts, boolVal) in parsedPoints) {
+                    if (previousState == null || previousState != boolVal) {
+                        val text = _resolveBooleanHistoryStateText(
+                            shortCapId = shortId,
+                            boolVal = boolVal,
+                            targetLog = targetLog,
+                            cachedDevice = cachedDevice
+                        )
+                        val isActiveState = isCapabilityActive(shortId, boolVal)
+                        events.add(
+                            DeviceHistoryEvent(
+                                timestamp = ts,
+                                isOn = isActiveState,
+                                stateText = text,
+                                serverClockOffsetMs = serverClockOffsetMs
+                            )
+                        )
+                        previousState = boolVal
+                    }
                 }
             }
 
             val sorted = events.sortedByDescending { it.timestamp }
-            Log.d(TAG, "[DeviceRepository:getDeviceStateHistory] Found ${sorted.size} historical state transitions for $deviceId")
+            Log.d(_TAG, "[DeviceRepository:getDeviceStateHistory] Found ${sorted.size} historical state transitions for $maskedDeviceId")
             HomeyResult.Success(sorted)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "[DeviceRepository:getDeviceStateHistory] Exception: ${e.message}", e)
+            Log.e(_TAG, "[DeviceRepository:getDeviceStateHistory] Exception: ${e.message}", e)
             HomeyResult.Error(context.getString(R.string.repo_error_network, e.message ?: "Unknown error"))
         }
     }
 
     // ── Private Methods ───────────────────────────────────────────────────────
 
+    private data class _FetchedDevicesBundle(
+        val devicesResponse: Response<Map<String, DeviceDto>>,
+        val zonesResponse: Response<Map<String, ZoneDto>>,
+        val userResponse: Response<UserMeDto>?
+    )
+
+    /**
+     * Fetches devices, zones, and user profile concurrently to minimize cold-start latency.
+     *
+     * @private
+     * @param service Configured [HomeyApiService] pointing at the target hub.
+     * @return [_FetchedDevicesBundle] containing all three parallel responses.
+     * @example
+     * val bundle = _fetchDevicesBundle(service)
+     */
+    private suspend fun _fetchDevicesBundle(service: HomeyApiService): _FetchedDevicesBundle {
+        return coroutineScope {
+            val devicesDeferred = async { service.getDevices() }
+            val zonesDeferred = async { service.getZones() }
+            val userDeferred = async {
+                try {
+                    service.getUserMe()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(_TAG, "[DeviceRepository:_fetchDevicesBundle] Optional getUserMe failed: ${e.message}")
+                    null
+                }
+            }
+            _FetchedDevicesBundle(
+                devicesResponse = devicesDeferred.await(),
+                zonesResponse = zonesDeferred.await(),
+                userResponse = userDeferred.await()
+            )
+        }
+    }
+
+    /**
+     * Computes average room temperatures mapped by full zone path name from raw device DTOs.
+     *
+     * @private
+     * @param devices Full map of remote [DeviceDto] instances keyed by device UUID.
+     * @param zoneIdToPath Pre-resolved map of zone ID to display zone path name.
+     * @return Map of zone path name to average `measure_temperature` reading in degrees Celsius.
+     * @example
+     * val temps = _computeZoneTemperatures(devices, zoneIdToPath)
+     */
+    private fun _computeZoneTemperatures(
+        devices: Map<String, DeviceDto>,
+        zoneIdToPath: Map<String, String>
+    ): Map<String, Double> {
+        val zoneTempReadings = mutableMapOf<String, MutableList<Double>>()
+        for (dto in devices.values) {
+            val zoneId = dto.zone ?: continue
+            val caps = dto.capabilitiesObj ?: continue
+            val tempCap = caps[CAP_MEASURE_TEMPERATURE]
+            val tempVal = (tempCap?.value as? Number)?.toDouble()
+            if (tempVal != null && !tempVal.isNaN()) {
+                zoneTempReadings.getOrPut(zoneId) { mutableListOf() }.add(tempVal)
+            }
+        }
+        val computedTemps = mutableMapOf<String, Double>()
+        for ((zId, readings) in zoneTempReadings) {
+            if (readings.isNotEmpty()) {
+                val zonePathName = zoneIdToPath[zId] ?: continue
+                computedTemps[zonePathName] = readings.average()
+            }
+        }
+        return computedTemps
+    }
+
+    /**
+     * Merges live capability values, availability, capability metadata, and icon URL from a
+     * remote [DeviceDto] into an existing [HomeyDevice] instance.
+     *
+     * @private
+     * @param device Cached [HomeyDevice] to update.
+     * @param remoteDto Fresh [DeviceDto] received from the Homey Web API.
+     * @param targetHubId Optional hub identifier used to resolve relative icon URLs.
+     * @return Updated [HomeyDevice] preserving zone ordering and custom quick-action metadata.
+     * @example
+     * val refreshed = _mergeLiveDeviceDto(existing, remoteDto, storage.getSelectedHomeyId())
+     */
+    private fun _mergeLiveDeviceDto(
+        device: HomeyDevice,
+        remoteDto: DeviceDto,
+        targetHubId: String?
+    ): HomeyDevice {
+        val caps = remoteDto.capabilitiesObj ?: emptyMap()
+        val rawCaps = caps.mapValues { it.value.value }
+        val rawValue = caps[device.primaryCapability]?.value
+        val newIsActive = isCapabilityActive(device.primaryCapability, rawValue)
+        val newIsAvailable = remoteDto.available != false
+
+        val dimVal = (caps[CAP_DIM]?.value as? Number)?.toDouble() ?: device.dimValue
+        val targetTemp = (caps[CAP_TARGET_TEMPERATURE]?.value as? Number)?.toDouble() ?: device.targetTemperature
+        val devTemp = (caps[CAP_MEASURE_TEMPERATURE]?.value as? Number)?.toDouble() ?: device.temperature
+        val hue = (caps[CAP_LIGHT_HUE]?.value as? Number)?.toDouble() ?: device.lightHue
+        val sat = (caps[CAP_LIGHT_SATURATION]?.value as? Number)?.toDouble() ?: device.lightSaturation
+        val colorTemp = (caps[CAP_LIGHT_TEMPERATURE]?.value as? Number)?.toDouble() ?: device.lightTemperature
+        val capMeta = _parseCapabilitiesMetadata(caps).ifEmpty { device.capabilitiesMetadata }
+
+        val effectiveHub = targetHubId ?: storage.getSelectedHomeyId()
+        val resolvedIconUrl = if (!remoteDto.iconOverride.isNullOrBlank()) {
+            "https://my.homey.app/img/devices/${remoteDto.iconOverride}.svg"
+        } else if (!remoteDto.iconObj?.url.isNullOrBlank()) {
+            val raw = remoteDto.iconObj.url
+            if (raw.startsWith("http")) raw else {
+                val path = if (raw.startsWith("/")) raw else "/$raw"
+                if (!effectiveHub.isNullOrBlank()) "https://$effectiveHub.connect.athom.com$path" else device.iconUrl
+            }
+        } else {
+            device.iconUrl
+        }
+
+        return device.copy(
+            isActive = newIsActive,
+            isAvailable = newIsAvailable,
+            dimValue = dimVal,
+            targetTemperature = targetTemp,
+            currentTemperature = devTemp,
+            temperature = devTemp,
+            lightHue = hue,
+            lightSaturation = sat,
+            lightTemperature = colorTemp,
+            rawCapabilities = rawCaps,
+            capabilitiesMetadata = capMeta,
+            iconUrl = resolvedIconUrl
+        )
+    }
+
+    /**
+     * Fetches and briefly caches (5-minute TTL) the catalog of Homey Insights log descriptors
+     * for the active hub under [_insightLogsMutex], avoiding repeated ~88 KB downloads and
+     * 200+ item Gson deserializations when inspecting consecutive devices.
+     *
+     * @private
+     * @param service Authenticated [HomeyApiService] instance for the active hub.
+     * @return [HomeyResult.Success] with paired `(logList, serverDateMs)` or [HomeyResult.Error].
+     * @example
+     * val result = _getInsightLogsForActiveHub(service)
+     */
+    private suspend fun _getInsightLogsForActiveHub(
+        service: HomeyApiService
+    ): HomeyResult<Pair<List<InsightLogDto>, Long?>> = _insightLogsMutex.withLock {
+        val currentHubId = storage.getSelectedHomeyId()
+        val nowMs = System.currentTimeMillis()
+        val cacheTtlMs = 5 * 60 * 1000L
+
+        if (_cachedInsightLogs != null &&
+            _cachedInsightLogsHubId == currentHubId &&
+            (nowMs - _cachedInsightLogsTimestampMs) < cacheTtlMs
+        ) {
+            Log.d(_TAG, "[DeviceRepository:_getInsightLogsForActiveHub] Returning ${_cachedInsightLogs!!.size} insight logs from in-memory cache.")
+            return@withLock HomeyResult.Success(_cachedInsightLogs!! to _cachedInsightLogsServerDateMs)
+        }
+
+        val logsResponse = service.getInsightsLogs()
+        if (!logsResponse.isSuccessful) {
+            Log.e(_TAG, "[DeviceRepository:_getInsightLogsForActiveHub] Failed to get insight logs: HTTP ${logsResponse.code()} - ${logsResponse.errorBody()?.string()}")
+            return@withLock HomeyResult.Error(context.getString(R.string.recap_error_history))
+        }
+
+        val logsServerDateMs = logsResponse.headers().getDate("Date")?.time
+        val rootLogsJson = logsResponse.body()
+        val logList = mutableListOf<InsightLogDto>()
+        val gson = Gson()
+
+        if (rootLogsJson != null) {
+            if (rootLogsJson.isJsonArray) {
+                for (elem in rootLogsJson.asJsonArray) {
+                    if (elem.isJsonObject) {
+                        try {
+                            val log = gson.fromJson(elem, InsightLogDto::class.java)
+                            if (log != null) logList.add(log)
+                        } catch (e: Exception) {
+                            Log.w(_TAG, "[DeviceRepository:_getInsightLogsForActiveHub] Failed to parse log element: ${e.message}")
+                        }
+                    }
+                }
+            } else if (rootLogsJson.isJsonObject) {
+                for ((key, elem) in rootLogsJson.asJsonObject.entrySet()) {
+                    if (elem.isJsonObject) {
+                        try {
+                            val log = gson.fromJson(elem, InsightLogDto::class.java)
+                            if (log != null) {
+                                val resolvedLog = if (log.id.isNullOrBlank()) log.copy(id = key) else log
+                                logList.add(resolvedLog)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(_TAG, "[DeviceRepository:_getInsightLogsForActiveHub] Failed to parse log entry: ${e.message}")
+                        }
+                    }
+                }
+            }
+        }
+
+        _cachedInsightLogs = logList
+        _cachedInsightLogsHubId = currentHubId
+        _cachedInsightLogsTimestampMs = nowMs
+        _cachedInsightLogsServerDateMs = logsServerDateMs
+
+        Log.d(_TAG, "[DeviceRepository:_getInsightLogsForActiveHub] Retrieved and cached ${logList.size} insight logs.")
+        HomeyResult.Success(logList to logsServerDateMs)
+    }
+
+    /**
+     * Extracts the array of historical data points from either a raw JSON array
+     * or a Homey Insights entry envelope containing a `"values"` array.
+     *
+     * Private helper method.
+     *
+     * @private
+     * @param rootJson Parsed JSON element returned by Homey Insights or companion proxy.
+     * @return Extracted [JsonArray] of `{ t, v }` points, or `null` if unavailable.
+     * @example
+     * val points = _extractInsightPointsJson(entriesNode)
+     */
+    private fun _extractInsightPointsJson(rootJson: JsonElement?): JsonArray? {
+        return when {
+            rootJson == null -> null
+            rootJson.isJsonArray -> rootJson.asJsonArray
+            rootJson.isJsonObject && rootJson.asJsonObject.has("values") && rootJson.asJsonObject.get("values").isJsonArray -> {
+                rootJson.asJsonObject.getAsJsonArray("values")
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * Checks whether a remote Homey [DeviceDto] exposes any supported device class or capability.
+     *
+     * @private
+     * @param device Raw [DeviceDto] from Homey API.
+     * @return `true` if the device should be shown in HomeyWatch.
+     */
     private fun _isSupportedDevice(device: DeviceDto): Boolean {
         val clazz = device.effectiveClass?.lowercase() ?: ""
         val caps = device.capabilitiesObj ?: emptyMap()
@@ -927,6 +1230,19 @@ class DeviceRepository(
                 caps.keys.any { isButtonOrActionCapability(it) }
     }
 
+    /**
+     * Maps a raw Homey [DeviceDto] into a domain [HomeyDevice] with zone ordering, favorites,
+     * quick-action resolution, capabilities metadata, and icon URL.
+     *
+     * @private
+     * @param device Raw [DeviceDto] instance.
+     * @param zones Zone lookup map keyed by zone UUID.
+     * @param favoritesList Ordered list of user-favorited device IDs.
+     * @param excludedIds Device IDs bundled inside virtual groups.
+     * @param globalZoneOrder Precomputed DFS display order map for zones.
+     * @param targetHubId Optional explicit hub ID for relative icon URL resolution.
+     * @return Mapped [HomeyDevice] instance.
+     */
     private fun _toHomeyDevice(
         device: DeviceDto,
         zones: Map<String, ZoneDto>,
@@ -998,6 +1314,7 @@ class DeviceRepository(
         val capMeta = _parseCapabilitiesMetadata(caps)
 
         val effectiveHubId = targetHubId ?: storage.getSelectedHomeyId()
+        val favIndex = favoritesList.indexOf(device.id)
 
         return HomeyDevice(
             id = device.id,
@@ -1018,7 +1335,7 @@ class DeviceRepository(
             } else {
                 null
             },
-            isFavorite = favoritesList.contains(device.id),
+            isFavorite = favIndex >= 0,
             isLight = isLight,
             isHidden = device.hidden == true,
             isGroupMember = excludedIds.contains(device.id),
@@ -1039,31 +1356,178 @@ class DeviceRepository(
             lightTemperature = colorTemp,
             rawCapabilities = rawCaps,
             quickActionCapability = resolvedQuickActionCap,
-            capabilitiesMetadata = capMeta
+            capabilitiesMetadata = capMeta,
+            favoriteOrder = if (favIndex >= 0) favIndex else Int.MAX_VALUE
         )
     }
 
     /**
      * Parses raw [CapabilityDto] map from Homey API into structured [CapabilityMeta] domain objects.
+     *
+     * @private
+     * @param caps Raw capability DTO map keyed by capability identifier.
+     * @return Map of capability IDs to parsed [CapabilityMeta] descriptors.
+     * @example
+     * val metadata = _parseCapabilitiesMetadata(deviceDto.capabilitiesObj)
      */
     private fun _parseCapabilitiesMetadata(caps: Map<String, CapabilityDto>?): Map<String, CapabilityMeta> {
         if (caps.isNullOrEmpty()) return emptyMap()
         return caps.mapValues { (capId, capDto) ->
-            val titleStr = when (val t = capDto.title) {
-                is String -> t
-                is Map<*, *> -> (t["it"] ?: t["en"] ?: t.values.firstOrNull())?.toString()
-                else -> null
-            }
             CapabilityMeta(
                 id = capId,
                 type = capDto.type,
-                title = titleStr,
+                title = _resolveLocalizedText(capDto.title),
                 setable = capDto.setable != false,
-                uiComponent = capDto.uiComponent
+                uiComponent = capDto.uiComponent,
+                insightsTitleTrue = _resolveLocalizedText(capDto.insightsTitleTrue),
+                insightsTitleFalse = _resolveLocalizedText(capDto.insightsTitleFalse),
+                titleTrue = _resolveLocalizedText(capDto.titleTrue),
+                titleFalse = _resolveLocalizedText(capDto.titleFalse)
             )
         }
     }
 
+    /**
+     * Extracts a human-readable localized string from either a plain [String]
+     * or a Homey translation map (`{ "en": ..., "it": ... }`), prioritizing the current system locale.
+     *
+     * @private
+     * @param raw Dynamic field value parsed from Homey Web API JSON.
+     * @return Resolved non-blank string, or `null` if unavailable.
+     * @example
+     * val label = _resolveLocalizedText(capDto.insightsTitleTrue)
+     */
+    private fun _resolveLocalizedText(raw: Any?): String? {
+        return when (raw) {
+            is String -> raw.takeIf { it.isNotBlank() }
+            is Map<*, *> -> {
+                val lang = java.util.Locale.getDefault().language
+                (raw[lang] ?: raw["en"] ?: raw["it"] ?: raw.values.firstOrNull { it != null && it.toString().isNotBlank() })
+                    ?.toString()
+                    ?.takeIf { it.isNotBlank() }
+            }
+            else -> null
+        }
+    }
+
+    /**
+     * Selects the most representative Homey Insights log for a device's state history timeline.
+     * Prioritizes the device's configured primary/quick-action capability, then known boolean control
+     * capabilities (`onoff`, `garagedoor_closed`, `locked`, `windowcoverings_closed`), alarms, and other boolean logs.
+     *
+     * @private
+     * @param deviceLogs Filtered list of [InsightLogDto] belonging to the device.
+     * @param cachedDevice Optional cached [HomeyDevice] holding capability metadata and primary capability hints.
+     * @return Best-matching [InsightLogDto], or `null` if no logs are available.
+     * @example
+     * val target = _selectPrimaryHistoryLog(deviceLogs, cachedDevice)
+     */
+    private fun _selectPrimaryHistoryLog(
+        deviceLogs: List<InsightLogDto>,
+        cachedDevice: HomeyDevice?
+    ): InsightLogDto? {
+        if (deviceLogs.isEmpty()) return null
+
+        fun shortCapOf(log: InsightLogDto): String = (log.id ?: "").substringAfterLast(":")
+
+        if (cachedDevice != null) {
+            val preferredCaps = listOfNotNull(
+                cachedDevice.quickActionCapability,
+                cachedDevice.primaryCapability
+            ).distinct()
+            for (cap in preferredCaps) {
+                val match = deviceLogs.firstOrNull { log ->
+                    val shortCap = shortCapOf(log)
+                    shortCap.equals(cap, ignoreCase = true) ||
+                        shortCap.endsWith(".$cap", ignoreCase = true)
+                }
+                if (match != null) return match
+            }
+        }
+
+        val priorityCaps = listOf(CAP_ONOFF, CAP_GARAGEDOOR, "locked", "windowcoverings_closed")
+        for (cap in priorityCaps) {
+            val match = deviceLogs.firstOrNull { log ->
+                val shortCap = shortCapOf(log)
+                val baseCap = shortCap.substringBefore(".")
+                baseCap.equals(cap, ignoreCase = true)
+            }
+            if (match != null) return match
+        }
+
+        return deviceLogs.firstOrNull { log ->
+            shortCapOf(log).startsWith("alarm_", ignoreCase = true)
+        } ?: deviceLogs.firstOrNull { log ->
+            log.type.equals("boolean", ignoreCase = true) &&
+                !shortCapOf(log).contains(CAP_DIM, ignoreCase = true)
+        } ?: deviceLogs.firstOrNull { log ->
+            !shortCapOf(log).contains(CAP_DIM, ignoreCase = true)
+        } ?: deviceLogs.firstOrNull()
+    }
+
+    /**
+     * Resolves the localized state label for a historical boolean transition.
+     * Precedence: Homey Insight log `titleTrue`/`titleFalse` -> device capability `insightsTitleTrue`/`insightsTitleFalse`
+     * -> device capability `titleTrue`/`titleFalse` -> localized capability-specific fallback strings.
+     *
+     * @private
+     * @param shortCapId Short capability identifier (e.g. `"locked"`, `"garagedoor_closed"`, `"onoff"`).
+     * @param boolVal Raw boolean value recorded in Insights.
+     * @param targetLog Selected [InsightLogDto] metadata from Homey Insights.
+     * @param cachedDevice Optional cached [HomeyDevice] holding localized capability metadata and device class.
+     * @return Localized human-readable state label.
+     * @example
+     * val label = _resolveBooleanHistoryStateText("locked", false, targetLog, cachedDevice)
+     */
+    private fun _resolveBooleanHistoryStateText(
+        shortCapId: String,
+        boolVal: Boolean,
+        targetLog: InsightLogDto,
+        cachedDevice: HomeyDevice?
+    ): String {
+        val logTitle = if (boolVal) targetLog.titleTrue else targetLog.titleFalse
+        if (!logTitle.isNullOrBlank()) return logTitle
+
+        val capMeta = cachedDevice?.capabilitiesMetadata?.get(shortCapId)
+        val insightsTitle = if (boolVal) capMeta?.insightsTitleTrue else capMeta?.insightsTitleFalse
+        if (!insightsTitle.isNullOrBlank()) return insightsTitle
+
+        val sensorTitle = if (boolVal) capMeta?.titleTrue else capMeta?.titleFalse
+        if (!sensorTitle.isNullOrBlank()) return sensorTitle
+
+        val baseCap = shortCapId.substringBefore(".").lowercase()
+        val devClass = cachedDevice?.deviceClass?.lowercase()
+
+        return when {
+            baseCap == CAP_GARAGEDOOR || baseCap == "windowcoverings_closed" -> {
+                context.getString(if (boolVal) R.string.device_state_closed else R.string.device_state_open)
+            }
+            baseCap == "locked" -> {
+                if (devClass == "garagedoor") {
+                    context.getString(if (boolVal) R.string.device_state_closed else R.string.device_state_open)
+                } else {
+                    context.getString(if (boolVal) R.string.device_state_locked else R.string.device_state_unlocked)
+                }
+            }
+            baseCap == CAP_ONOFF -> {
+                context.getString(if (boolVal) R.string.device_history_turned_on else R.string.device_history_turned_off)
+            }
+            baseCap.startsWith("alarm_") -> {
+                context.getString(if (boolVal) R.string.device_history_alarm_triggered else R.string.device_history_alarm_cleared)
+            }
+            else -> {
+                context.getString(if (boolVal) R.string.device_history_active else R.string.device_history_inactive)
+            }
+        }
+    }
+
+    /**
+     * Computes a flattened depth-first display order index for each Homey zone tree node.
+     *
+     * @private
+     * @param zones Map of zone ID to [ZoneDto].
+     * @return Map of zone ID to integer display order index.
+     */
     private fun _computeGlobalZoneOrder(zones: Map<String, ZoneDto>): Map<String, Int> {
         val childrenMap = mutableMapOf<String?, MutableList<ZoneDto>>()
         zones.values.forEach { zone ->
@@ -1093,6 +1557,14 @@ class DeviceRepository(
         return flattenedOrder
     }
 
+    /**
+     * Builds a hierarchical display path string for a zone (excluding the root home node).
+     *
+     * @private
+     * @param zoneId Target zone identifier.
+     * @param zones Map of zone ID to [ZoneDto].
+     * @return Formatted zone path (e.g. `"Ground Floor - Living Room"`).
+     */
     private fun _buildZonePathName(zoneId: String?, zones: Map<String, ZoneDto>): String {
         if (zoneId == null) return context.getString(R.string.repo_zone_unknown)
         
@@ -1385,6 +1857,33 @@ class DeviceRepository(
                     str.equals("true", ignoreCase = true) || str == "1"
                 } else null
             } else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Parses a JSON element from an insight log entry into a Double numeric value.
+     *
+     * @private
+     * @param json JsonElement representing a number or numeric string.
+     * @return Parsed [Double], or `null` if invalid or non-numeric.
+     * @example
+     * val level = _parseInsightValueToDouble(obj.get("v"))
+     */
+    private fun _parseInsightValueToDouble(json: com.google.gson.JsonElement?): Double? {
+        if (json == null || json.isJsonNull) return null
+        return try {
+            if (json.isJsonPrimitive) {
+                val prim = json.asJsonPrimitive
+                when {
+                    prim.isNumber -> prim.asDouble
+                    prim.isString -> prim.asString.toDoubleOrNull()
+                    else -> null
+                }
+            } else {
+                null
+            }
         } catch (e: Exception) {
             null
         }

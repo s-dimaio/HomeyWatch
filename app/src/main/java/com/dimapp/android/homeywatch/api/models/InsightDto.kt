@@ -8,11 +8,15 @@ import com.google.gson.annotations.SerializedName
  *
  * Public data class.
  *
- * @property id Log identifier (e.g. "onoff", "dim").
+ * @property id Log identifier (e.g. "onoff", "dim", "homey:device:xxx:locked").
  * @property uri Resource URI (e.g. "homey:device:xxx").
  * @property ownerUri Owner URI (e.g. "homey:device:xxx").
+ * @property ownerId Owner identifier (typically the device UUID).
  * @property type Log data type (e.g. "boolean", "number").
  * @property title Human readable title.
+ * @property titleTrue Localized label returned by Homey when a boolean log value is `true` (optional).
+ * @property titleFalse Localized label returned by Homey when a boolean log value is `false` (optional).
+ * @property units Unit of measure for numeric logs (optional).
  */
 data class InsightLogDto(
     @SerializedName("id") val id: String? = null,
@@ -20,7 +24,10 @@ data class InsightLogDto(
     @SerializedName("ownerUri") val ownerUri: String? = null,
     @SerializedName("ownerId") val ownerId: String? = null,
     @SerializedName("type") val type: String? = null,
-    @SerializedName("title") val title: String? = null
+    @SerializedName("title") val title: String? = null,
+    @SerializedName("titleTrue") val titleTrue: String? = null,
+    @SerializedName("titleFalse") val titleFalse: String? = null,
+    @SerializedName("units") val units: String? = null
 )
 
 /**

@@ -36,6 +36,8 @@
 -keep class com.dimapp.android.homeywatch.api.models.** { *; }
 -keep class com.dimapp.android.homeywatch.repository.models.** { *; }
 -keep class com.dimapp.android.homeywatch.storage.** { *; }
+-keep class com.dimapp.android.homeywatch.tile.TileDeviceSnapshot { *; }
+-keep class com.dimapp.android.homeywatch.tile.TileSlotSnapshot { *; }
 
 # ── OkHttp & Okio ─────────────────────────────────────────────────────────────
 -dontwarn okhttp3.**

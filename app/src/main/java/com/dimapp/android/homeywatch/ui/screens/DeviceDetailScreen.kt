@@ -100,9 +100,14 @@ import com.dimapp.android.homeywatch.repository.models.resolveSliderCapabilities
 import com.dimapp.android.homeywatch.ui.theme.HomeyThermostat
 import com.dimapp.android.homeywatch.ui.theme.TextPrimary
 import com.dimapp.android.homeywatch.ui.theme.TextSecondary
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import kotlin.math.round
 import kotlin.math.roundToInt
 
@@ -180,7 +185,6 @@ fun resolveDeviceTabs(device: HomeyDevice): List<DeviceTab> = buildList {
  * @param onNavigateBack Callback invoked to navigate back to the dashboard.
  * @param isOperating Whether a mutation is currently in flight.
  * @param onToggleOnOff Callback to toggle the primary binary capability.
- * @param onSetDim Callback to set brightness / level between 0.0 and 1.0.
  * @param onSetSliderValue Callback to set any continuous slider capability (dim, volume_set, windowcoverings_set, etc.).
  * @param onSetTargetTemperature Callback to update target temperature in Celsius.
  * @param onSetColor Callback to update color hue and saturation.
@@ -197,8 +201,7 @@ fun DeviceDetailScreen(
     onNavigateBack: (() -> Unit)? = null,
     isOperating: Boolean = false,
     onToggleOnOff: (Boolean) -> Unit,
-    onSetDim: (Double) -> Unit = {},
-    onSetSliderValue: (capabilityId: String, value: Double) -> Unit = { _, v -> onSetDim(v) },
+    onSetSliderValue: (capabilityId: String, value: Double) -> Unit = { _, _ -> },
     onSetTargetTemperature: (Double) -> Unit = {},
     onSetColor: (hue: Double, saturation: Double) -> Unit = { _, _ -> },
     onSetColorTemperature: (Double) -> Unit = {},
@@ -259,7 +262,7 @@ fun DeviceDetailScreen(
     val isRecapActive = availableTabs.getOrNull(pagerState.currentPage) == DeviceTab.RECAP
 
     LaunchedEffect(isRecapActive, device.id) {
-        if (isRecapActive && historyEvents == null && onLoadHistory != null) {
+        if (isRecapActive && onLoadHistory != null) {
             isHistoryLoading = true
             historyLoadError = false
             try {
@@ -272,6 +275,8 @@ fun DeviceDetailScreen(
                         historyLoadError = true
                     }
                 }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 historyLoadError = true
             } finally {
@@ -1301,7 +1306,7 @@ private fun _DeviceRecapTab(
                     _TimelineNodeItem(
                         event = event,
                         isLast = index == historyEvents.lastIndex,
-                        relativeTime = _formatRelativeTime(context, event.timestamp)
+                        relativeTime = _formatRelativeTime(context, event.timestamp, event.serverClockOffsetMs)
                     )
                 }
             }
@@ -1383,20 +1388,47 @@ private fun _TimelineNodeItem(
 
 
 /**
- * Formats an epoch millisecond timestamp into a human-readable relative time string.
+ * Formats an epoch millisecond timestamp into a human-readable relative/clock time string,
+ * compensating for local-to-server clock drift using [serverClockOffsetMs].
+ *
+ * @private
+ * @param context Android context for resolving localized time strings.
+ * @param timestamp Event epoch milliseconds (UTC).
+ * @param serverClockOffsetMs Offset (`serverNowMs - localNowMs`) from HTTP `Date` headers.
+ * @return Concise localized time label (e.g. `"5 min ago · 18:09"`, `"Yesterday · 18:09"`, `"06/11 · 18:09"`).
+ * @example
+ * val label = _formatRelativeTime(context, event.timestamp, event.serverClockOffsetMs)
  */
-private fun _formatRelativeTime(context: Context, timestamp: Long): String {
-    val now = System.currentTimeMillis()
-    val diffMs = (now - timestamp).coerceAtLeast(0L)
+private fun _formatRelativeTime(
+    context: Context,
+    timestamp: Long,
+    serverClockOffsetMs: Long = 0L
+): String {
+    val zone = ZoneId.systemDefault()
+    val locale = Locale.getDefault()
+    val now = System.currentTimeMillis() + serverClockOffsetMs
+    val rawDiffMs = now - timestamp
+
+    val zonedTs = Instant.ofEpochMilli(timestamp).atZone(zone)
+    val exactClock = zonedTs.format(DateTimeFormatter.ofPattern("HH:mm", locale))
+    val dateTimeFormatter = DateTimeFormatter.ofPattern("dd/MM · HH:mm", locale)
+
+    // Never clamp genuinely future timestamps (from an unsynced local clock) to "Just now".
+    if (rawDiffMs < -120_000L) {
+        return zonedTs.format(dateTimeFormatter)
+    }
+
+    val diffMs = rawDiffMs.coerceAtLeast(0L)
     val diffMinutes = diffMs / (60 * 1000L)
     val diffHours = diffMs / (3600 * 1000L)
-    val diffDays = diffMs / (24 * 3600 * 1000L)
+    val nowDate = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+    val tsDate = zonedTs.toLocalDate()
 
     return when {
         diffMinutes < 2 -> context.getString(R.string.time_just_now)
-        diffMinutes < 60 -> context.getString(R.string.time_minutes_ago, diffMinutes.toInt())
-        diffHours < 24 -> context.getString(R.string.time_hours_ago, diffHours.toInt())
-        diffDays < 2 -> context.getString(R.string.time_yesterday)
-        else -> context.getString(R.string.time_days_ago, diffDays.toInt())
+        diffMinutes < 60 -> "${context.getString(R.string.time_minutes_ago, diffMinutes.toInt())} · $exactClock"
+        tsDate == nowDate -> "${context.getString(R.string.time_hours_ago, diffHours.toInt().coerceAtLeast(1))} · $exactClock"
+        tsDate == nowDate.minusDays(1) -> "${context.getString(R.string.time_yesterday)} · $exactClock"
+        else -> zonedTs.format(dateTimeFormatter)
     }
 }

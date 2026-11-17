@@ -1,5 +1,6 @@
 package com.dimapp.android.homeywatch.ui.screens
 
+import android.util.Log
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -35,9 +36,16 @@ import com.dimapp.android.homeywatch.repository.models.HomeyDevice
 import com.dimapp.android.homeywatch.repository.models.HomeyResult
 import com.dimapp.android.homeywatch.storage.TokenStorage
 import com.dimapp.android.homeywatch.tile.TileSlotManager
+import com.dimapp.android.homeywatch.tile.TileSnapshotStore
 import com.dimapp.android.homeywatch.ui.components.HubCurvedHeader
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+
+private const val _TAG = "MainContainerScreen"
+private const val _MAX_IN_VIEW_TIMEOUT_MS = 45_000L
 
 /**
  * Root multi-tab container screen for HomeyWatch on Wear OS.
@@ -55,6 +63,7 @@ import kotlinx.coroutines.launch
  * @param storage Persistent secure settings storage.
  * @param onOpenDetail Callback invoked when a device is tapped to open its detailed controls.
  * @param onNavigateAddHub Callback to navigate to setup screen for adding an additional hub.
+ * @param onNavigateReauth Callback to navigate to setup screen to re-authenticate the active hub.
  * @param onLoggedOut Callback invoked when user logs out.
  * @param modifier Layout modifier.
  * @example
@@ -79,6 +88,7 @@ fun MainContainerScreen(
     storage: TokenStorage,
     onOpenDetail: (HomeyDevice) -> Unit,
     onNavigateAddHub: () -> Unit,
+    onNavigateReauth: () -> Unit,
     onLoggedOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -89,10 +99,16 @@ fun MainContainerScreen(
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 4 })
 
     var allDevices by remember { mutableStateOf<List<HomeyDevice>>(emptyList()) }
-    var quickDevices by remember { mutableStateOf<List<HomeyDevice>>(emptyList()) }
     var zoneTemperatures by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
+    var lastSyncEpochMs by remember { mutableStateOf(0L) }
+
+    val favoriteDevices = remember(allDevices) {
+        allDevices
+            .filter { it.isFavorite }
+            .sortedWith(compareBy<HomeyDevice> { it.favoriteOrder }.thenBy { it.name })
+    }
 
     val operatingMap = remember { mutableStateMapOf<String, Boolean>() }
 
@@ -100,6 +116,22 @@ fun MainContainerScreen(
         stringResource(id = R.string.demo_hub_title)
     } else {
         storage.getSelectedHomeyName() ?: "Homey"
+    }
+
+    /**
+     * Persists the current quick-action device metadata for stateless Tiles and requests a redraw
+     * only when the Tile structure (devices, labels, icons, or capabilities) changed.
+     *
+     * @private
+     */
+    fun _syncQuickTileSnapshot(devices: List<HomeyDevice>) {
+        val activeHubId = if (storage.isDemoMode()) "demo" else storage.getSelectedHomeyId()
+        if (!activeHubId.isNullOrBlank()) {
+            val changed = TileSnapshotStore.saveHubSnapshotIfChanged(context, activeHubId, hubName, devices)
+            if (changed) {
+                TileSlotManager.updateAllSlots(context)
+            }
+        }
     }
 
     /**
@@ -116,14 +148,22 @@ fun MainContainerScreen(
                 dashboardRepo.invalidateCache()
             }
 
-            val devicesResult = deviceRepo.getDevices(forceRefresh = force)
-            if (devicesResult is HomeyResult.Success) {
-                allDevices = devicesResult.data
-                zoneTemperatures = deviceRepo.getZoneTemperatures()
-                val dashResult = dashboardRepo.getQuickDevices(devicesResult.data, forceRefresh = force)
-                quickDevices = dashResult
-            } else if (devicesResult is HomeyResult.Error) {
-                errorMessage = devicesResult.message
+            coroutineScope {
+                val devicesDeferred = async { deviceRepo.getDevices(forceRefresh = force) }
+                val dashboardDeferred = async { dashboardRepo.prefetchDashboardConfig(forceRefresh = force) }
+
+                val devicesResult = devicesDeferred.await()
+                if (devicesResult is HomeyResult.Success) {
+                    allDevices = devicesResult.data
+                    zoneTemperatures = deviceRepo.getZoneTemperatures()
+                    lastSyncEpochMs = System.currentTimeMillis()
+                    dashboardDeferred.await()
+                    val tileDevices = dashboardRepo.getQuickDevices(devicesResult.data, forceRefresh = false)
+                    _syncQuickTileSnapshot(tileDevices)
+                } else if (devicesResult is HomeyResult.Error) {
+                    dashboardDeferred.cancel()
+                    errorMessage = devicesResult.message
+                }
             }
 
             isLoading = false
@@ -136,63 +176,94 @@ fun MainContainerScreen(
             if (flowDevices.isNotEmpty()) {
                 allDevices = flowDevices
                 zoneTemperatures = deviceRepo.getZoneTemperatures()
-                quickDevices = dashboardRepo.getQuickDevices(flowDevices)
                 isLoading = false
             }
         }
     }
 
-    // Initial load and periodic foreground synchronization loop
+    /**
+     * Synchronizes device states from Homey in the foreground for in-app screens,
+     * skipping redundant network calls if the repository cache was just refreshed.
+     *
+     * @private
+     */
+    suspend fun _syncForegroundStates() {
+        val currentList = allDevices.ifEmpty {
+            val initial = deviceRepo.getDevices(forceRefresh = false)
+            if (initial is HomeyResult.Success) initial.data else emptyList()
+        }
+        val configuredInterval = storage.getSyncInterval()
+        val syncIntervalMillis = (configuredInterval.coerceAtLeast(10)) * 1000L
+        val lastRepoSync = deviceRepo.getLastSyncTimestamp()
+        if (lastRepoSync > 0L && (System.currentTimeMillis() - lastRepoSync) < syncIntervalMillis) {
+            lastSyncEpochMs = lastRepoSync
+            if (allDevices.isEmpty() && currentList.isNotEmpty()) {
+                allDevices = currentList
+            }
+            return
+        }
+        if (currentList.isNotEmpty()) {
+            val result = deviceRepo.syncDeviceStates(currentList)
+            if (result is HomeyResult.Success) {
+                allDevices = result.data
+                lastSyncEpochMs = System.currentTimeMillis()
+            }
+        }
+    }
+
+    // Initial load when main container enters composition (slots are synced at app startup & hub config changes)
     LaunchedEffect(lifecycleOwner) {
         _refreshData(force = false)
-        TileSlotManager.syncSlots(context)
+    }
 
+    // Periodic foreground sync loop with technical timeout (45s).
+    // Only runs on device-centric tabs (Favorites & Dashboard) and respects cooldown on rapid swipes.
+    LaunchedEffect(lifecycleOwner, pagerState.currentPage) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            suspend fun syncStates() {
-                val now = System.currentTimeMillis()
-                val lastSync = deviceRepo.getLastSyncTimestamp()
-                val syncInterval = storage.getSyncInterval().coerceAtLeast(10)
-                val intervalMillis = syncInterval * 1000L
-
-                if (now - lastSync >= intervalMillis || allDevices.isEmpty()) {
-                    val currentList = allDevices.ifEmpty {
-                        val initial = deviceRepo.getDevices(forceRefresh = false)
-                        if (initial is HomeyResult.Success) initial.data else emptyList()
-                    }
-                    if (currentList.isNotEmpty()) {
-                        val result = deviceRepo.syncDeviceStates(currentList)
-                        if (result is HomeyResult.Success) {
-                            val previousQuick = quickDevices
-                            val updatedQuick = dashboardRepo.getQuickDevices(result.data, forceRefresh = true)
-                            quickDevices = updatedQuick
-
-                            val hasChanged = previousQuick.size != updatedQuick.size || previousQuick.zip(updatedQuick).any { (old, new) ->
-                                old.id != new.id ||
-                                old.isActive != new.isActive ||
-                                old.isAvailable != new.isAvailable ||
-                                old.dimValue != new.dimValue ||
-                                old.displayName != new.displayName ||
-                                old.primaryCapability != new.primaryCapability ||
-                                old.iconUrl != new.iconUrl
-                            }
-                            if (hasChanged) {
-                                TileSlotManager.updateAllSlots(context)
-                            }
-                        }
-                    }
-                }
+            val isDeviceTab = pagerState.currentPage == 0 || pagerState.currentPage == 1
+            if (!isDeviceTab) {
+                Log.d(_TAG, "[MainContainerScreen:syncLoop] Tab ${pagerState.currentPage} does not display live device states. Foreground device sync paused.")
+                return@repeatOnLifecycle
             }
 
-            syncStates()
+            val configuredInterval = storage.getSyncInterval()
+            if (configuredInterval <= 0) {
+                Log.d(_TAG, "[MainContainerScreen:syncLoop] Sync interval is OFF. Periodic sync disabled.")
+                return@repeatOnLifecycle
+            }
 
-            while (true) {
-                val syncInterval = storage.getSyncInterval().coerceAtLeast(10)
-                if (storage.isDemoMode()) {
-                    delay(15000L)
-                    continue
+            val syncIntervalMillis = (configuredInterval.coerceAtLeast(10)) * 1000L
+            val startTime = System.currentTimeMillis()
+
+            // Debounce brief intermediate pages while swiping across tabs
+            delay(250)
+            if (!isActive) return@repeatOnLifecycle
+
+            Log.d(_TAG, "[MainContainerScreen:syncLoop] Tab ${pagerState.currentPage} active. Starting foreground sync (interval=${syncIntervalMillis}ms, timeout=${_MAX_IN_VIEW_TIMEOUT_MS}ms).")
+
+            // Trigger immediate sync only when cached state is older than the sync interval
+            // (prevents duplicate full-device fetches during cold start or rapid tab switching)
+            val elapsedSinceLastSync = System.currentTimeMillis() - lastSyncEpochMs
+            if (allDevices.isNotEmpty() && elapsedSinceLastSync >= syncIntervalMillis) {
+                _syncForegroundStates()
+            }
+
+            // Periodic sync until the 45-second technical timeout is reached
+            while (isActive) {
+                if (System.currentTimeMillis() - startTime >= _MAX_IN_VIEW_TIMEOUT_MS) {
+                    Log.d(_TAG, "[MainContainerScreen:syncLoop] Tab ${pagerState.currentPage} reached 45s timeout. Stopping periodic sync until screen changes.")
+                    break
                 }
-                delay(syncInterval * 1000L)
-                syncStates()
+
+                delay(syncIntervalMillis)
+                if (!isActive) break
+
+                if (System.currentTimeMillis() - startTime >= _MAX_IN_VIEW_TIMEOUT_MS) {
+                    Log.d(_TAG, "[MainContainerScreen:syncLoop] Tab ${pagerState.currentPage} reached 45s timeout. Stopping periodic sync until screen changes.")
+                    break
+                }
+
+                _syncForegroundStates()
             }
         }
     }
@@ -207,7 +278,6 @@ fun MainContainerScreen(
         val optimisticDevice = if (isButton) device else device.copy(isActive = targetActive)
 
         allDevices = allDevices.map { if (it.id == optimisticDevice.id) optimisticDevice else it }
-        quickDevices = quickDevices.map { if (it.id == optimisticDevice.id) optimisticDevice else it }
         operatingMap[device.id] = true
 
         coroutineScope.launch {
@@ -220,7 +290,6 @@ fun MainContainerScreen(
 
             if (result is HomeyResult.Error) {
                 allDevices = allDevices.map { if (it.id == device.id) device else it }
-                quickDevices = quickDevices.map { if (it.id == device.id) device else it }
             }
         }
     }
@@ -243,6 +312,9 @@ fun MainContainerScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
+        val needsReauth = storage.isReauthRequired() || errorMessage?.contains("401") == true
+        val isCompanionUpdated = storage.getReauthReason() == "COMPANION_UPDATED"
+
         // 4-page Horizontal Pager Carousel
         HorizontalPager(
             state = pagerState,
@@ -251,11 +323,15 @@ fun MainContainerScreen(
             when (page) {
                 0 -> {
                     HomeScreen(
-                        quickDevices = quickDevices,
+                        favoriteDevices = favoriteDevices,
                         isLoading = isLoading,
+                        isReauthRequired = needsReauth,
+                        isCompanionUpdated = isCompanionUpdated,
                         operatingMap = operatingMap,
                         onToggleDevice = { device, nextChecked -> _onToggleDevice(device, nextChecked) },
-                        onOpenDetail = onOpenDetail
+                        onOpenDetail = onOpenDetail,
+                        onNavigateReauth = onNavigateReauth,
+                        isVisible = pagerState.currentPage == 0
                     )
                 }
                 1 -> {
@@ -264,18 +340,26 @@ fun MainContainerScreen(
                         zoneTemperatures = zoneTemperatures,
                         isLoading = isLoading,
                         errorMessage = errorMessage,
+                        isReauthRequired = needsReauth,
+                        isCompanionUpdated = isCompanionUpdated,
                         operatingMap = operatingMap,
                         onToggleDevice = { device, nextChecked -> _onToggleDevice(device, nextChecked) },
                         onOpenDetail = onOpenDetail,
-                        onRetry = { _refreshData(force = true) }
+                        onRetry = { _refreshData(force = true) },
+                        onNavigateReauth = onNavigateReauth,
+                        isVisible = pagerState.currentPage == 1
                     )
                 }
                 2 -> {
-                    FlowsScreen(flowRepo = flowRepo)
+                    val activeHubId = if (storage.isDemoMode()) "demo" else storage.getSelectedHomeyId()
+                    FlowsScreen(
+                        flowRepo = flowRepo,
+                        activeHubId = activeHubId,
+                        isVisible = pagerState.currentPage == 2
+                    )
                 }
                 3 -> {
                     SettingsScreen(
-                        authRepo = authRepo,
                         storage = storage,
                         onNavigateAddHub = onNavigateAddHub,
                         onHubSwitched = {
@@ -289,7 +373,8 @@ fun MainContainerScreen(
                             flowRepo.invalidateCache()
                             dashboardRepo.invalidateCache()
                             onLoggedOut()
-                        }
+                        },
+                        isVisible = pagerState.currentPage == 3
                     )
                 }
             }

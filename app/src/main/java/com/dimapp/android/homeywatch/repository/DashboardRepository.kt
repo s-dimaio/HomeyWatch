@@ -3,14 +3,16 @@ package com.dimapp.android.homeywatch.repository
 import android.content.Context
 import android.util.Log
 import com.dimapp.android.homeywatch.R
-import com.dimapp.android.homeywatch.repository.models.HomeyDashboard
 import com.dimapp.android.homeywatch.repository.models.HomeyDevice
 import com.dimapp.android.homeywatch.repository.models.HomeyResult
-import com.dimapp.android.homeywatch.api.HomeyApiClient
+import com.dimapp.android.homeywatch.api.SanitizedHttpLogger
 import com.dimapp.android.homeywatch.auth.HomeyAuthRepository
 import com.dimapp.android.homeywatch.storage.TokenStorage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 import com.dimapp.android.homeywatch.repository.models.isCapabilityActive
 import com.dimapp.android.homeywatch.tile.TileIconHelper
@@ -27,7 +29,7 @@ class DashboardRepository(
     authRepo: HomeyAuthRepository
 ) : HomeyBaseRepository(context, storage, authRepo) {
 
-    private val TAG = "DashboardRepository"
+    private val _TAG = "DashboardRepository"
     private val _dashMutex = Mutex()
 
     private data class _VirtualDashboardData(
@@ -36,108 +38,93 @@ class DashboardRepository(
         val customNames: Map<String, String>
     )
 
-    private var _cachedDashboardData: _VirtualDashboardData? = null
     private val _cachedHubDashboardData = mutableMapOf<String, _VirtualDashboardData>()
 
     /**
      * Clears in-memory dashboard cache.
      *
      * @public
+     * @example
+     * ```kotlin
+     * dashboardRepo.invalidateCache()
+     * ```
      */
     fun invalidateCache() {
-        Log.d(TAG, "[DashboardRepository:invalidateCache] Invalidated dashboard cache.")
-        _cachedDashboardData = null
+        Log.d(_TAG, "[DashboardRepository:invalidateCache] Invalidated dashboard cache.")
         _cachedHubDashboardData.clear()
     }
 
     /**
-     * Resolves the list of quick action devices for Wear OS.
-     * Checks the virtual dashboard from com.dimapp.wearos; if empty, falls back to favorite devices.
+     * Pre-fetches and caches the active hub virtual dashboard configuration so initial startup
+     * can execute dashboard and device requests concurrently.
+     *
+     * @public
+     * @param forceRefresh Whether to bypass the in-memory dashboard cache.
+     * @example
+     * ```kotlin
+     * val dashJob = async { dashboardRepo.prefetchDashboardConfig(forceRefresh = force) }
+     * ```
+     */
+    suspend fun prefetchDashboardConfig(forceRefresh: Boolean = false) = withContext(Dispatchers.IO) {
+        if (storage.isDemoMode()) return@withContext
+        try {
+            _getDashboardData("virtual-wearos-home", hubId = null, forceRefresh = forceRefresh)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(_TAG, "[DashboardRepository:prefetchDashboardConfig] Dashboard prefetch failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Resolves the list of quick action devices for Wear OS on the active hub.
+     * Checks the virtual dashboard from `com.dimapp.wearos`; if empty, falls back to favorite devices.
      * Applies custom primary Quick Action capabilities configured by the user.
      *
      * @public
      * @param allDevices Complete list of fetched [HomeyDevice] instances.
      * @param forceRefresh Whether to force a network reload of the virtual dashboard configuration.
      * @return Ordered list of devices for quick actions and Wear OS tiles.
+     * @example
+     * val quick = dashboardRepo.getQuickDevices(allDevices, forceRefresh = true)
      */
     suspend fun getQuickDevices(
         allDevices: List<HomeyDevice>,
         forceRefresh: Boolean = false
-    ): List<HomeyDevice> {
-        val visibleDevices = allDevices.filter { !it.isHidden && !it.isGroupMember }
-
-        if (storage.isDemoMode()) {
-            return visibleDevices.filter { it.isFavorite }
-        }
-
-        return try {
-            val dashResult = _getDashboardData("virtual-wearos-home", forceRefresh = forceRefresh)
-            if (dashResult is HomeyResult.Success && dashResult.data.deviceIds.isNotEmpty()) {
-                val (deviceIds, capabilities, customNames) = dashResult.data
-                val devicesById = visibleDevices.associateBy { it.id }
-
-                val orderedDevices = deviceIds.mapNotNull { id ->
-                    devicesById[id]?.let { dev ->
-                        val customCap = capabilities[id]
-                        val customLabel = customNames[id]
-                        if (!customCap.isNullOrBlank()) {
-                            val rawVal = dev.rawCapabilities[customCap]
-                            val newIsActive = isCapabilityActive(customCap, rawVal)
-                            dev.copy(
-                                primaryCapability = customCap,
-                                quickActionCapability = customCap,
-                                isActive = newIsActive,
-                                customName = customLabel
-                            )
-                        } else {
-                            dev.copy(customName = customLabel)
-                        }
-                    }
-                }
-
-                val resultDevices = if (orderedDevices.isNotEmpty()) orderedDevices else visibleDevices.filter { it.isFavorite }
-                TileIconHelper.preloadDeviceIcons(context, resultDevices)
-                resultDevices
-            } else {
-                val resultDevices = visibleDevices.filter { it.isFavorite }
-                TileIconHelper.preloadDeviceIcons(context, resultDevices)
-                resultDevices
-            }
-        } catch (e: Exception) {
-            val resultDevices = visibleDevices.filter { it.isFavorite }
-            TileIconHelper.preloadDeviceIcons(context, resultDevices)
-            resultDevices
-        }
-    }
+    ): List<HomeyDevice> = getQuickDevicesForHub(allDevices, hubId = null, forceRefresh = forceRefresh)
 
     /**
      * Resolves the list of quick action devices for a specific hub (or active hub if [hubId] is null).
      *
      * @public
      * @param allDevices Complete list of fetched [HomeyDevice] instances for that hub.
-     * @param hubId Target Homey ID or "demo".
+     * @param hubId Target Homey ID or `"demo"`. Defaults to active hub when `null` or blank.
      * @param forceRefresh Whether to force a network reload of the virtual dashboard configuration.
      * @return Ordered list of devices for quick actions and Wear OS tiles.
+     * @example
+     * val quick = dashboardRepo.getQuickDevicesForHub(devices, hubId = "hub-id", forceRefresh = false)
      */
     suspend fun getQuickDevicesForHub(
         allDevices: List<HomeyDevice>,
         hubId: String?,
         forceRefresh: Boolean = false
-    ): List<HomeyDevice> {
+    ): List<HomeyDevice> = withContext(Dispatchers.IO) {
         val visibleDevices = allDevices.filter { !it.isHidden && !it.isGroupMember }
+        val targetHubId = hubId?.takeIf { it.isNotBlank() }
+        val isDemo = targetHubId?.startsWith("demo") == true || (targetHubId == null && storage.isDemoMode())
 
-        if (hubId?.startsWith("demo") == true || (hubId.isNullOrBlank() && storage.isDemoMode())) {
+        if (isDemo) {
             val resultDevices = visibleDevices.filter { it.isFavorite }
-            TileIconHelper.preloadDeviceIcons(context, resultDevices, hubId)
-            return resultDevices
+            TileIconHelper.preloadDeviceIcons(context, resultDevices, targetHubId)
+            return@withContext resultDevices
         }
 
-        if (hubId.isNullOrBlank() || hubId == storage.getSelectedHomeyId()) {
-            return getQuickDevices(allDevices, forceRefresh = forceRefresh)
-        }
-
-        return try {
-            val dashResult = _getDashboardDataForHub("virtual-wearos-home", hubId, forceRefresh = forceRefresh)
+        val resultDevices = try {
+            val dashResult = _getDashboardData(
+                dashboardId = "virtual-wearos-home",
+                hubId = targetHubId,
+                forceRefresh = forceRefresh
+            )
             if (dashResult is HomeyResult.Success && dashResult.data.deviceIds.isNotEmpty()) {
                 val (deviceIds, capabilities, customNames) = dashResult.data
                 val devicesById = visibleDevices.associateBy { it.id }
@@ -160,87 +147,41 @@ class DashboardRepository(
                         }
                     }
                 }
-
-                val resultDevices = if (orderedDevices.isNotEmpty()) orderedDevices else visibleDevices.filter { it.isFavorite }
-                TileIconHelper.preloadDeviceIcons(context, resultDevices, hubId)
-                resultDevices
+                if (orderedDevices.isNotEmpty()) orderedDevices else visibleDevices.filter { it.isFavorite }
             } else {
-                val resultDevices = visibleDevices.filter { it.isFavorite }
-                TileIconHelper.preloadDeviceIcons(context, resultDevices, hubId)
-                resultDevices
+                visibleDevices.filter { it.isFavorite }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            val resultDevices = visibleDevices.filter { it.isFavorite }
-            TileIconHelper.preloadDeviceIcons(context, resultDevices, hubId)
-            resultDevices
+            Log.w(_TAG, "[DashboardRepository:getQuickDevicesForHub] Failed to map dashboard, falling back to favorites: ${e.message}")
+            visibleDevices.filter { it.isFavorite }
         }
+
+        TileIconHelper.preloadDeviceIcons(context, resultDevices, targetHubId)
+        resultDevices
     }
 
     /**
-     * Returns all custom dashboards provided by the Homey Companion App.
-     */
-    suspend fun getDashboards(): HomeyResult<List<HomeyDashboard>> {
-        if (storage.isDemoMode()) {
-            return HomeyResult.Success(
-                listOf(
-                    HomeyDashboard(
-                        id = "demo_dashboard",
-                        name = "Dashboard"
-                    )
-                )
-            )
-        }
-
-        val service = _buildService() ?: return HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-
-        return try {
-            val response = service.getDashboards()
-            if (!response.isSuccessful) {
-                val errorBody = response.errorBody()?.string() ?: "no body"
-                Log.e(TAG, "getDashboards HTTP ${response.code()} - error body: $errorBody")
-                return HomeyResult.Error(context.getString(R.string.repo_error_dashboards_http, response.code()))
-            }
-
-            val dashboards = (response.body() ?: emptyMap())
-                .values
-                .map { 
-                    HomeyDashboard(
-                        id = it.id, 
-                        name = "Dashboard"
-                    ) 
-                }
-                .sortedBy { it.name }
-
-            HomeyResult.Success(dashboards)
-        } catch (e: Exception) {
-            HomeyResult.Error(context.getString(R.string.repo_error_conn_failed, e.message ?: "Unknown error"))
-        }
-    }
-
-    /**
-     * Retrieves the set of device UUIDs that belong to a given dashboard's widgets.
-     */
-    suspend fun getDashboardDeviceIds(dashboardId: String): HomeyResult<Set<String>> {
-        val result = _getDashboardData(dashboardId)
-        return when (result) {
-            is HomeyResult.Success -> HomeyResult.Success(result.data.deviceIds.toSet())
-            is HomeyResult.Error -> HomeyResult.Error(result.message)
-        }
-    }
-
-    /**
-     * Retrieves the ordered list of device UUIDs, configured capabilities, and custom names map for a given dashboard.
+     * Retrieves the ordered list of device UUIDs, configured capabilities, and custom names map
+     * for a virtual dashboard on the target hub (or active hub when [hubId] is `null`).
      *
      * @private
-     * @param dashboardId Virtual dashboard identifier.
-     * @param forceRefresh Whether to bypass cache and query the network.
+     * @param dashboardId Virtual dashboard identifier (e.g. `"virtual-wearos-home"`).
+     * @param hubId Optional target Homey hub ID. Defaults to the active hub when `null`.
+     * @param forceRefresh Whether to bypass the in-memory cache and query the network.
      * @return [HomeyResult] containing [_VirtualDashboardData].
+     * @example
+     * val data = _getDashboardData("virtual-wearos-home", hubId = targetHubId, forceRefresh = false)
      */
     private suspend fun _getDashboardData(
         dashboardId: String,
+        hubId: String? = null,
         forceRefresh: Boolean = false
     ): HomeyResult<_VirtualDashboardData> = _dashMutex.withLock {
-        if (storage.isDemoMode()) {
+        val targetHubId = hubId?.takeIf { it.isNotBlank() } ?: storage.getSelectedHomeyId()
+        val isDemo = targetHubId?.startsWith("demo") == true || (targetHubId == null && storage.isDemoMode())
+        if (isDemo || storage.isDemoMode()) {
             return@withLock HomeyResult.Success(
                 _VirtualDashboardData(
                     listOf("demo_light_1", "demo_light_2", "demo_door_1", "demo_garage_1"),
@@ -250,15 +191,22 @@ class DashboardRepository(
             )
         }
 
-        if (!forceRefresh && _cachedDashboardData != null) {
-            return@withLock HomeyResult.Success(_cachedDashboardData!!)
+        val cacheKey = targetHubId?.let { "$it:$dashboardId" }
+        if (!forceRefresh && cacheKey != null) {
+            _cachedHubDashboardData[cacheKey]?.let { cached ->
+                return@withLock HomeyResult.Success(cached)
+            }
         }
 
-        val service = _buildService() ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
+        val service = _buildServiceForHub(targetHubId)
+            ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
 
         return@withLock try {
             val dashboardResponse = service.getDashboards()
             if (!dashboardResponse.isSuccessful) {
+                if (dashboardResponse.code() == 401 && !targetHubId.isNullOrBlank()) {
+                    storage.setReauthRequired(targetHubId, true, "EXPIRED")
+                }
                 HomeyResult.Error(context.getString(R.string.repo_error_dashboards_http, dashboardResponse.code()))
             } else {
                 val dashboard = dashboardResponse.body()?.get(dashboardId)
@@ -284,72 +232,18 @@ class DashboardRepository(
                     }
 
                     val resultData = _VirtualDashboardData(deviceIds, capabilities, customNames)
-                    _cachedDashboardData = resultData
-                    Log.d(TAG, "_getDashboardData for $dashboardId: found ${deviceIds.size} device IDs, ${capabilities.size} custom capabilities, ${customNames.size} custom names.")
-                    HomeyResult.Success(resultData)
-                }
-            }
-        } catch (e: Exception) {
-            HomeyResult.Error(context.getString(R.string.repo_error_conn_failed, e.message ?: "Unknown error"))
-        }
-    }
-
-    /**
-     * Retrieves the ordered list of device UUIDs, capabilities, and custom names map for a dashboard on a specific hub.
-     *
-     * @private
-     * @param dashboardId Virtual dashboard identifier.
-     * @param hubId Target Homey hub ID.
-     * @param forceRefresh Whether to bypass cache and query the network.
-     * @return [HomeyResult] containing [_VirtualDashboardData].
-     */
-    private suspend fun _getDashboardDataForHub(
-        dashboardId: String,
-        hubId: String,
-        forceRefresh: Boolean = false
-    ): HomeyResult<_VirtualDashboardData> = _dashMutex.withLock {
-        if (!forceRefresh && _cachedHubDashboardData.containsKey(hubId)) {
-            return@withLock HomeyResult.Success(_cachedHubDashboardData[hubId]!!)
-        }
-
-        val entry = storage.getHubToken(hubId) ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-        val apiUrl = entry.apiUrl ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-        val sessionToken = entry.sessionToken ?: return@withLock HomeyResult.Error(context.getString(R.string.repo_error_not_configured))
-
-        val service = HomeyApiClient.createForHub(apiUrl, sessionToken)
-        return@withLock try {
-            val dashboardResponse = service.getDashboards()
-            if (!dashboardResponse.isSuccessful) {
-                HomeyResult.Error(context.getString(R.string.repo_error_dashboards_http, dashboardResponse.code()))
-            } else {
-                val dashboard = dashboardResponse.body()?.get(dashboardId)
-                if (dashboard == null) {
-                    HomeyResult.Error(context.getString(R.string.repo_error_dashboards_http, 404))
-                } else {
-                    val customWidgets = dashboard.columns
-                        .flatMap { column -> column.widgets }
-                        .filter { widget -> widget.type == "devices_custom" }
-
-                    val deviceIds = customWidgets
-                        .flatMap { widget -> widget.data?.deviceIds ?: emptyList() }
-
-                    val capabilities = mutableMapOf<String, String>()
-                    val customNames = mutableMapOf<String, String>()
-                    customWidgets.forEach { widget ->
-                        widget.data?.capabilities?.let { caps ->
-                            capabilities.putAll(caps)
-                        }
-                        widget.data?.customNames?.let { names ->
-                            customNames.putAll(names)
-                        }
+                    if (cacheKey != null) {
+                        _cachedHubDashboardData[cacheKey] = resultData
                     }
-
-                    val resultData = _VirtualDashboardData(deviceIds, capabilities, customNames)
-                    _cachedHubDashboardData[hubId] = resultData
-                    Log.d(TAG, "_getDashboardDataForHub for $dashboardId on $hubId: found ${deviceIds.size} device IDs, ${capabilities.size} custom capabilities, ${customNames.size} custom names.")
+                    Log.d(
+                        _TAG,
+                        "[DashboardRepository:_getDashboardData] Resolved $dashboardId for hub=${SanitizedHttpLogger.maskId(targetHubId)}: ${deviceIds.size} deviceIds, ${capabilities.size} capabilities, ${customNames.size} customNames."
+                    )
                     HomeyResult.Success(resultData)
                 }
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             HomeyResult.Error(context.getString(R.string.repo_error_conn_failed, e.message ?: "Unknown error"))
         }

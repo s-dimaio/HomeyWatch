@@ -4,32 +4,25 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.util.Log
-import androidx.wear.tiles.TileService
 import coil.Coil
-import coil.ImageLoader
 import coil.decode.SvgDecoder
-import coil.disk.DiskCache
-import coil.memory.MemoryCache
 import coil.request.ErrorResult
 import coil.request.ImageRequest
 import coil.request.SuccessResult
+import com.dimapp.android.homeywatch.api.SanitizedHttpLogger
 import com.dimapp.android.homeywatch.core.DependencyManager
 import com.dimapp.android.homeywatch.repository.models.HomeyDevice
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import java.io.File
 import java.nio.ByteBuffer
 import java.security.MessageDigest
-import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.TimeUnit
-import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManager
-import javax.net.ssl.X509TrustManager
 
 /**
  * Helper responsible for loading, rasterizing, caching, and preloading Homey device icons
@@ -38,7 +31,7 @@ import javax.net.ssl.X509TrustManager
  */
 object TileIconHelper {
 
-    private const val TAG = "TileIconHelper"
+    private const val _TAG = "TileIconHelper"
 
     /** Default resolution for Tile button icons (48x48 px is crisp and compact). */
     const val TILE_ICON_SIZE_PX = 48
@@ -46,8 +39,20 @@ object TileIconHelper {
     /** In-memory cache: iconUrl -> Raw ARGB_8888 byte buffer */
     private val _iconBytesCache = ConcurrentHashMap<String, ByteArray>()
 
+    /** Cooldown tracker for failed icon downloads to prevent endless retries: fullUrl -> failureEpochMillis */
+    private val _failedUrlTimestamps = ConcurrentHashMap<String, Long>()
+
+    /** Cooldown duration for failed icon URLs (6 hours). */
+    private const val _NEGATIVE_CACHE_DURATION_MS = 6 * 3600 * 1000L
+
     /** Set of in-flight download URLs to prevent redundant parallel HTTP requests. */
     private val _inFlightUrls = ConcurrentHashMap.newKeySet<String>()
+
+    /** Per-cache-key locks preventing concurrent duplicate network downloads and disk writes. */
+    private val _keyMutexes = ConcurrentHashMap<String, Mutex>()
+
+    /** Shared IO coroutine scope for asynchronous icon preloading tasks. */
+    private val _preloadScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Resolves and creates the persistent disk directory for tile icon raw ARGB buffers.
@@ -65,7 +70,7 @@ object TileIconHelper {
             try {
                 legacyDir.deleteRecursively()
             } catch (e: Exception) {
-                Log.w(TAG, "[TileIconHelper:_getCacheDirectory] Error deleting legacy cache: ${e.message}")
+                Log.w(_TAG, "[TileIconHelper:_getCacheDirectory] Error deleting legacy cache: ${e.message}")
             }
         }
         val dir = File(context.applicationContext.filesDir, "tile_icons_v2")
@@ -183,68 +188,99 @@ object TileIconHelper {
                 return bytes
             }
         } catch (e: Exception) {
-            Log.w(TAG, "[TileIconHelper:loadDeviceIconBytes] Error checking disk cache: ${e.message}")
+            Log.w(_TAG, "[TileIconHelper:loadDeviceIconBytes] Error checking disk cache: ${e.message}")
         }
 
         return withContext(Dispatchers.IO) {
-            try {
-                val storage = DependencyManager.getTokenStorage(appCtx)
-                val effectiveHubId = hubId ?: storage.getSelectedHomeyId()
-                val fullUrl = _resolveAbsoluteUrl(iconUrl, effectiveHubId)
-
-                val loader = _getImageLoader(appCtx)
-                val request = ImageRequest.Builder(appCtx)
-                    .data(fullUrl)
-                    .decoderFactory(SvgDecoder.Factory())
-                    .size(sizePx, sizePx)
-                    .allowHardware(false)
-                    .build()
-
-                val response = loader.execute(request)
-                val result = (response as? SuccessResult)?.drawable
-                if (result == null) {
-                    val err = (response as? ErrorResult)?.throwable
-                    Log.w(TAG, "[TileIconHelper:loadDeviceIconBytes] Failed to load icon from: $fullUrl (reason: ${err?.message})")
-                    return@withContext null
-                }
-
-                val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
-                val canvas = Canvas(bitmap)
-                result.setBounds(0, 0, sizePx, sizePx)
-                result.draw(canvas)
-
-                // Convert all rendered non-transparent pixels to crisp pure white (#FFFFFF) preserving alpha
-                val pixels = IntArray(sizePx * sizePx)
-                bitmap.getPixels(pixels, 0, sizePx, 0, 0, sizePx, sizePx)
-                for (i in pixels.indices) {
-                    val pixel = pixels[i]
-                    val alpha = (pixel ushr 24) and 0xFF
-                    if (alpha > 0) {
-                        pixels[i] = (alpha shl 24) or 0x00FFFFFF
-                    }
-                }
-                bitmap.setPixels(pixels, 0, sizePx, 0, 0, sizePx, sizePx)
-
-                val byteBuffer = ByteBuffer.allocate(bitmap.byteCount)
-                bitmap.copyPixelsToBuffer(byteBuffer)
-                val byteArray = byteBuffer.array()
-
-                // Save to memory cache
-                _iconBytesCache[cacheKey] = byteArray
-
-                // Save to persistent disk cache
+            val keyMutex = _keyMutexes.computeIfAbsent(cacheKey) { Mutex() }
+            keyMutex.withLock {
+                // Re-check caches inside lock in case another coroutine completed the fetch while waiting
+                _iconBytesCache[cacheKey]?.let { return@withLock it }
                 try {
-                    val file = _getCacheFile(appCtx, cacheKey)
-                    file.writeBytes(byteArray)
-                    Log.d(TAG, "[TileIconHelper:loadDeviceIconBytes] Persisted ${byteArray.size} bytes to disk for icon: $fullUrl")
+                    val diskFile = _getCacheFile(appCtx, cacheKey)
+                    if (diskFile.exists() && diskFile.length() > 0) {
+                        val bytes = diskFile.readBytes()
+                        _iconBytesCache[cacheKey] = bytes
+                        return@withLock bytes
+                    }
                 } catch (e: Exception) {
-                    Log.w(TAG, "[TileIconHelper:loadDeviceIconBytes] Error persisting icon to disk: ${e.message}")
+                    Log.w(_TAG, "[TileIconHelper:loadDeviceIconBytes] Error re-checking disk cache: ${e.message}")
                 }
 
-                byteArray
-            } catch (e: Exception) {
-                Log.e(TAG, "[TileIconHelper:loadDeviceIconBytes] Error rasterizing icon ($iconUrl): ${e.message}")
-                null
+                try {
+                    val storage = DependencyManager.getTokenStorage(appCtx)
+                    val effectiveHubId = hubId ?: storage.getSelectedHomeyId()
+                    val fullUrl = _resolveAbsoluteUrl(iconUrl, effectiveHubId)
+
+                    // Check negative cache cooldown to avoid endless rapid retries on 404 or bad icon URLs
+                    val lastFailure = _failedUrlTimestamps[fullUrl]
+                    if (lastFailure != null && System.currentTimeMillis() - lastFailure < _NEGATIVE_CACHE_DURATION_MS) {
+                        Log.d(_TAG, "[TileIconHelper:loadDeviceIconBytes] Skipping failed icon due to negative cache cooldown: ${SanitizedHttpLogger.sanitize(fullUrl)}")
+                        return@withLock null
+                    }
+
+                    val loader = Coil.imageLoader(appCtx)
+                    val request = ImageRequest.Builder(appCtx)
+                        .data(fullUrl)
+                        .decoderFactory(SvgDecoder.Factory())
+                        .size(sizePx, sizePx)
+                        .allowHardware(false)
+                        .build()
+
+                    val response = loader.execute(request)
+                    val result = (response as? SuccessResult)?.drawable
+                    if (result == null) {
+                        _failedUrlTimestamps[fullUrl] = System.currentTimeMillis()
+                        val err = (response as? ErrorResult)?.throwable
+                        Log.w(_TAG, "[TileIconHelper:loadDeviceIconBytes] Failed to load icon from: ${SanitizedHttpLogger.sanitize(fullUrl)} (reason: ${err?.message})")
+                        return@withLock null
+                    }
+
+                    val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+                    val canvas = Canvas(bitmap)
+                    result.setBounds(0, 0, sizePx, sizePx)
+                    result.draw(canvas)
+
+                    // Convert all rendered non-transparent pixels to crisp pure white (#FFFFFF) preserving alpha
+                    val pixels = IntArray(sizePx * sizePx)
+                    bitmap.getPixels(pixels, 0, sizePx, 0, 0, sizePx, sizePx)
+                    for (i in pixels.indices) {
+                        val pixel = pixels[i]
+                        val alpha = (pixel ushr 24) and 0xFF
+                        if (alpha > 0) {
+                            pixels[i] = (alpha shl 24) or 0x00FFFFFF
+                        }
+                    }
+                    bitmap.setPixels(pixels, 0, sizePx, 0, 0, sizePx, sizePx)
+
+                    val byteBuffer = ByteBuffer.allocate(bitmap.byteCount)
+                    bitmap.copyPixelsToBuffer(byteBuffer)
+                    val byteArray = byteBuffer.array()
+
+                    // Save to memory cache and clear any previous failure record
+                    _iconBytesCache[cacheKey] = byteArray
+                    _failedUrlTimestamps.remove(fullUrl)
+
+                    // Save to persistent disk cache
+                    try {
+                        val file = _getCacheFile(appCtx, cacheKey)
+                        file.writeBytes(byteArray)
+                        Log.d(_TAG, "[TileIconHelper:loadDeviceIconBytes] Persisted ${byteArray.size} bytes to disk for icon: ${SanitizedHttpLogger.sanitize(fullUrl)}")
+                    } catch (e: Exception) {
+                        Log.w(_TAG, "[TileIconHelper:loadDeviceIconBytes] Error persisting icon to disk: ${e.message}")
+                    }
+
+                    byteArray
+                } catch (e: Exception) {
+                    try {
+                        val storage = DependencyManager.getTokenStorage(appCtx)
+                        val effectiveHubId = hubId ?: storage.getSelectedHomeyId()
+                        val fullUrl = _resolveAbsoluteUrl(iconUrl, effectiveHubId)
+                        _failedUrlTimestamps[fullUrl] = System.currentTimeMillis()
+                    } catch (_: Exception) {}
+                    Log.e(_TAG, "[TileIconHelper:loadDeviceIconBytes] Error rasterizing icon ($iconUrl): ${e.message}")
+                    null
+                }
             }
         }
     }
@@ -260,6 +296,10 @@ object TileIconHelper {
      * @param iconUrl Target icon URL.
      * @param sizePx Target size in pixels.
      * @return Cached byte array or null.
+     * @example
+     * ```kotlin
+     * val bytes = TileIconHelper.getCachedIconBytes(context, device.iconUrl)
+     * ```
      */
     fun getCachedIconBytes(context: Context? = null, iconUrl: String?, sizePx: Int = TILE_ICON_SIZE_PX): ByteArray? {
         if (iconUrl.isNullOrBlank()) return null
@@ -278,7 +318,7 @@ object TileIconHelper {
                     return bytes
                 }
             } catch (e: Exception) {
-                Log.w(TAG, "[TileIconHelper:getCachedIconBytes] Error reading icon from disk: ${e.message}")
+                Log.w(_TAG, "[TileIconHelper:getCachedIconBytes] Error reading icon from disk: ${e.message}")
             }
         }
 
@@ -295,6 +335,10 @@ object TileIconHelper {
      * @param context Application context.
      * @param devices List of devices to preload.
      * @param targetHubId Target Homey hub ID (or null for current active hub).
+     * @example
+     * ```kotlin
+     * TileIconHelper.preloadDeviceIcons(context, devices)
+     * ```
      */
     fun preloadDeviceIcons(
         context: Context,
@@ -311,7 +355,7 @@ object TileIconHelper {
             .sortedByDescending { it.isFavorite }
         if (sortedCandidates.isEmpty()) return
 
-        CoroutineScope(Dispatchers.IO).launch {
+        _preloadScope.launch {
             var anyLoaded = false
             for (dev in sortedCandidates) {
                 val url = dev.iconUrl ?: continue
@@ -326,7 +370,7 @@ object TileIconHelper {
                         _iconBytesCache[cacheKey] = diskBytes
                         continue
                     } catch (e: Exception) {
-                        Log.w(TAG, "[TileIconHelper:preloadDeviceIcons] Error reading disk cache for ${dev.name}: ${e.message}")
+                        Log.w(_TAG, "[TileIconHelper:preloadDeviceIcons] Error reading disk cache for ${dev.name}: ${e.message}")
                     }
                 }
 
@@ -337,7 +381,7 @@ object TileIconHelper {
                             anyLoaded = true
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "[TileIconHelper:preloadDeviceIcons] Preload error for ${dev.name}: ${e.message}")
+                        Log.e(_TAG, "[TileIconHelper:preloadDeviceIcons] Preload error for ${dev.name}: ${e.message}")
                     } finally {
                         _inFlightUrls.remove(url)
                     }
@@ -361,101 +405,9 @@ object TileIconHelper {
     private fun _notifyTileSlotsUpdated(context: Context) {
         try {
             TileSlotManager.updateAllSlots(context)
-            Log.d(TAG, "[TileIconHelper:_notifyTileSlotsUpdated] Requested Tile updates after preloading icons.")
+            Log.d(_TAG, "[TileIconHelper:_notifyTileSlotsUpdated] Requested Tile updates after preloading icons.")
         } catch (e: Exception) {
-            Log.w(TAG, "[TileIconHelper:_notifyTileSlotsUpdated] Could not trigger Tile update: ${e.message}")
-        }
-    }
-
-    private var _imageLoader: ImageLoader? = null
-
-    /**
-     * Lazy-initialises and returns the dedicated Coil [ImageLoader] with SVG capabilities,
-     * persistent disk caching, token injection for Athom Connect, and permissive SSL.
-     * Aligned with HomeyAutomotive's IconFetcher._getImageLoader.
-     *
-     * Private helper method.
-     *
-     * @private
-     * @param context Application context.
-     * @return Configured [ImageLoader] instance.
-     */
-    private fun _getImageLoader(context: Context): ImageLoader {
-        return _imageLoader ?: synchronized(this) {
-            _imageLoader ?: run {
-                val appCtx = context.applicationContext
-                val storage = DependencyManager.getTokenStorage(appCtx)
-                val okHttpClientBuilder = OkHttpClient.Builder()
-                    .connectTimeout(15, TimeUnit.SECONDS)
-                    .readTimeout(15, TimeUnit.SECONDS)
-                    .addInterceptor { chain ->
-                        val request = chain.request()
-                        val requestBuilder = request.newBuilder()
-                        val host = request.url.host
-                        val token = if (host.endsWith("connect.athom.com")) {
-                            val hubId = host.removeSuffix(".connect.athom.com")
-                            storage.getHubToken(hubId)?.sessionToken ?: storage.getHubSessionToken()
-                        } else {
-                            null
-                        }
-
-                        // Add token only for Athom Connect URLs (local/remote API)
-                        if (!token.isNullOrBlank()) {
-                            requestBuilder.addHeader("Authorization", "Bearer $token")
-                        }
-                        chain.proceed(requestBuilder.build())
-                    }
-
-                _configurePermissiveSsl(okHttpClientBuilder)
-
-                val loader = ImageLoader.Builder(appCtx)
-                    .components {
-                        add(SvgDecoder.Factory())
-                    }
-                    .memoryCache {
-                        MemoryCache.Builder(appCtx)
-                            .maxSizePercent(0.25)
-                            .build()
-                    }
-                    .diskCache {
-                        DiskCache.Builder()
-                            .directory(appCtx.cacheDir.resolve("image_cache"))
-                            .maxSizeBytes(10 * 1024 * 1024)
-                            .build()
-                    }
-                    .okHttpClient(okHttpClientBuilder.build())
-                    .build()
-
-                _imageLoader = loader
-                loader
-            }
-        }
-    }
-
-    /**
-     * Configures a permissive SSL context for image loading to prevent "Chain validation failed"
-     * errors on Wear OS emulators/devices with missing or expired root CA certificates.
-     *
-     * Private helper method.
-     *
-     * @private
-     * @param builder OkHttpClient builder to configure.
-     */
-    private fun _configurePermissiveSsl(builder: OkHttpClient.Builder) {
-        try {
-            val trustAllCerts = arrayOf<TrustManager>(
-                object : X509TrustManager {
-                    override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                    override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-                    override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-                }
-            )
-            val sslContext = SSLContext.getInstance("TLS")
-            sslContext.init(null, trustAllCerts, SecureRandom())
-            builder.sslSocketFactory(sslContext.socketFactory, trustAllCerts[0] as X509TrustManager)
-            builder.hostnameVerifier { _, _ -> true }
-        } catch (e: Exception) {
-            Log.e(TAG, "[TileIconHelper:_configurePermissiveSsl] Error setting permissive SSL: ${e.message}")
+            Log.w(_TAG, "[TileIconHelper:_notifyTileSlotsUpdated] Could not trigger Tile update: ${e.message}")
         }
     }
 }

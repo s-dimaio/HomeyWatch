@@ -1,8 +1,14 @@
 package com.dimapp.android.homeywatch.ui.screens
 
-import android.content.Context
+import android.app.Activity
+import android.app.RemoteInput
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.graphics.Bitmap
+import android.util.Log
+import android.view.inputmethod.EditorInfo
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -12,20 +18,23 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
-import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.rotary.onRotaryScrollEvent
+import androidx.wear.input.RemoteInputIntentHelper
+import androidx.wear.input.wearableExtender
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -61,9 +70,13 @@ import androidx.wear.compose.material.CircularProgressIndicator
 import androidx.wear.compose.material.CompactChip
 import androidx.wear.compose.material.Icon
 import androidx.wear.compose.material.MaterialTheme
+import androidx.wear.compose.material.PositionIndicator
+import androidx.wear.compose.material.Scaffold
 import androidx.wear.compose.foundation.lazy.ScalingLazyColumn
+import androidx.wear.compose.foundation.lazy.rememberScalingLazyListState
 import androidx.wear.compose.material.Text
 import com.dimapp.android.homeywatch.R
+import com.dimapp.android.homeywatch.api.SanitizedHttpLogger
 import com.dimapp.android.homeywatch.auth.HomeyAuthRepository
 import com.dimapp.android.homeywatch.auth.PollResult
 import com.dimapp.android.homeywatch.discovery.DiscoveredHomey
@@ -80,14 +93,25 @@ import java.security.SecureRandom
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+private const val _TAG = "SetupScreen"
+private const val _REMOTE_INPUT_KEY_HOMEY_ID = "homey_id"
+
 /**
  * Setup and authentication screen for Wear OS.
  *
  * Supports:
  * - Automatic zero-configuration discovery of Homey Pro hubs via mDNS (_homey._tcp)
- * - Manual Homey ID entry with Gboard / voice dictation fallback (or "demo" for demo mode)
+ * - Manual Homey ID entry via Wear OS RemoteInput (voice dictation, watch keyboard, or paired phone)
  * - Launching authorization on paired phone via RemoteActivityHelper
  * - Displaying QR Code on watch display
+ *
+ * @public
+ * @param authRepo Repository orchestrating companion OAuth authentication.
+ * @param storage Secure preference storage managing hub tokens and preferences.
+ * @param onAuthSuccess Callback triggered once hub connection or demo activation succeeds.
+ * @param onCancel Optional callback triggered when cancelling add-hub setup; null during initial onboarding.
+ * @example
+ * SetupScreen(authRepo = authRepository, storage = tokenStorage, onAuthSuccess = { navigateHome() })
  */
 @Composable
 fun SetupScreen(
@@ -97,14 +121,22 @@ fun SetupScreen(
     onCancel: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
-    val focusManager = LocalFocusManager.current
     val coroutineScope = rememberCoroutineScope()
 
     val discovery = remember { HomeyMdnsDiscovery(context) }
+    val listState = rememberScalingLazyListState(initialCenterItemIndex = 0)
+    val rotaryFocusRequester = remember { FocusRequester() }
     val discoveredHubs by discovery.discoveredHubs.collectAsState()
     val isSearching by discovery.isSearching.collectAsState()
 
-    var homeyIdInput by remember { mutableStateOf(if (onCancel != null) "" else (storage.getSelectedHomeyId() ?: "")) }
+    val initialHomeyId = remember {
+        if (onCancel == null || storage.isReauthRequired()) {
+            storage.getSelectedHomeyId() ?: ""
+        } else {
+            ""
+        }
+    }
+    var homeyId by remember { mutableStateOf(initialHomeyId) }
     var isPairingActive by remember { mutableStateOf(false) }
     var isManualEntryExpanded by remember { mutableStateOf(false) }
     var authUrl by remember { mutableStateOf<String?>(null) }
@@ -112,6 +144,54 @@ fun SetupScreen(
     var showQrCode by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var isPhoneDispatched by remember { mutableStateOf(false) }
+
+    val remoteInputLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val results = RemoteInput.getResultsFromIntent(result.data)
+            val enteredText = results?.getCharSequence(_REMOTE_INPUT_KEY_HOMEY_ID)?.toString()
+            if (enteredText != null) {
+                val sanitized = enteredText.replace(Regex("\\s+"), "")
+                Log.d(
+                    _TAG,
+                    "[SetupScreen:remoteInputLauncher] Accepted input: length=${sanitized.length}, id=${SanitizedHttpLogger.maskId(sanitized)}"
+                )
+                homeyId = sanitized
+                errorMessage = null
+            } else {
+                Log.w(_TAG, "[SetupScreen:remoteInputLauncher] RESULT_OK received with missing RemoteInput payload")
+            }
+        } else {
+            Log.d(_TAG, "[SetupScreen:remoteInputLauncher] RemoteInput ended without result: resultCode=${result.resultCode}")
+        }
+    }
+
+    /**
+     * Launches the system Wear OS RemoteInput activity for voice dictation, watch keyboard, or paired phone entry.
+     *
+     * @private
+     */
+    fun _launchWearRemoteInput() {
+        val label = context.getString(R.string.setup_enter_homey_id)
+        val remoteInputs = listOf(
+            RemoteInput.Builder(_REMOTE_INPUT_KEY_HOMEY_ID)
+                .setLabel(label)
+                .wearableExtender {
+                    setEmojisAllowed(false)
+                    setInputActionType(EditorInfo.IME_ACTION_DONE)
+                }
+                .build()
+        )
+        val intent: Intent = RemoteInputIntentHelper.createActionRemoteInputIntent()
+        RemoteInputIntentHelper.putRemoteInputsExtra(intent, remoteInputs)
+        try {
+            Log.d(_TAG, "[SetupScreen:_launchWearRemoteInput] Launching system RemoteInput chooser")
+            remoteInputLauncher.launch(intent)
+        } catch (ex: ActivityNotFoundException) {
+            Log.e(_TAG, "[SetupScreen:_launchWearRemoteInput] System RemoteInput activity unavailable: ${ex.message}")
+        }
+    }
 
     val infiniteTransition = rememberInfiniteTransition(label = "refresh_rotation")
     val refreshRotation by infiniteTransition.animateFloat(
@@ -142,7 +222,7 @@ fun SetupScreen(
 
         discovery.stopDiscovery()
 
-        val cleanId = homeyIdInput.trim()
+        val cleanId = homeyId.replace(Regex("\\s+"), "")
         val sessionId = _generateSessionId()
 
         val url = authRepo.startCompanionAuth(cleanId, sessionId)
@@ -170,7 +250,7 @@ fun SetupScreen(
                     if (storage.isDemoMode()) {
                         storage.clearDemoMode()
                     }
-                    com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlots(context)
+                    com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlotsAsync(context)
                     onAuthSuccess()
                     break
                 }
@@ -194,12 +274,32 @@ fun SetupScreen(
         }
     }
 
-    ScalingLazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black),
-        horizontalAlignment = Alignment.CenterHorizontally
+    LaunchedEffect(isPairingActive, isManualEntryExpanded) {
+        listState.scrollToItem(0)
+        runCatching { rotaryFocusRequester.requestFocus() }
+    }
+
+    Scaffold(
+        positionIndicator = { PositionIndicator(scalingLazyListState = listState) }
     ) {
+        ScalingLazyColumn(
+            state = listState,
+            autoCentering = null,
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+            contentPadding = PaddingValues(top = 28.dp, bottom = 36.dp, start = 8.dp, end = 8.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black)
+                .focusRequester(rotaryFocusRequester)
+                .focusable()
+                .onRotaryScrollEvent { event ->
+                    coroutineScope.launch {
+                        listState.scrollBy(event.verticalScrollPixels)
+                    }
+                    true
+                },
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
         if (isPairingActive) {
             // ==================================================================
             // STATE 1: Pairing in Progress UI (Phone-first or direct QR Code)
@@ -418,14 +518,21 @@ fun SetupScreen(
                 }
             }
 
-            // Editable text input field with direct typing, ADB support, and soft keyboard
+            // Wear OS RemoteInput card with single-line horizontally scrollable display
             item {
+                val cleanDisplayId = homeyId.replace(Regex("\\s+"), "")
+                val displayScrollState = rememberScrollState()
+                LaunchedEffect(cleanDisplayId) {
+                    displayScrollState.scrollTo(0)
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth(0.92f)
+                        .defaultMinSize(minHeight = 48.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color(0xFF1E1E22))
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .clickable { _launchWearRemoteInput() }
+                        .padding(start = 12.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
@@ -436,12 +543,12 @@ fun SetupScreen(
                         Icon(
                             painter = painterResource(id = R.drawable.ic_edit),
                             contentDescription = null,
-                            tint = if (homeyIdInput.isNotBlank()) HomeyBlue else TextSecondary,
+                            tint = if (cleanDisplayId.isNotBlank()) HomeyBlue else TextSecondary,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.size(8.dp))
                         Box(modifier = Modifier.weight(1f)) {
-                            if (homeyIdInput.isEmpty()) {
+                            if (cleanDisplayId.isEmpty()) {
                                 Text(
                                     text = stringResource(id = R.string.setup_enter_homey_id),
                                     style = MaterialTheme.typography.body2,
@@ -449,48 +556,46 @@ fun SetupScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .horizontalScroll(displayScrollState)
+                                ) {
+                                    Text(
+                                        text = cleanDisplayId,
+                                        style = MaterialTheme.typography.body2.copy(color = TextPrimary),
+                                        softWrap = false,
+                                        maxLines = 1
+                                    )
+                                }
                             }
-                            BasicTextField(
-                                value = homeyIdInput,
-                                onValueChange = {
-                                    homeyIdInput = it.trim()
-                                    errorMessage = null
-                                },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.body2.copy(color = TextPrimary),
-                                cursorBrush = SolidColor(HomeyBlue),
-                                keyboardOptions = KeyboardOptions(
-                                    capitalization = KeyboardCapitalization.None,
-                                    keyboardType = KeyboardType.Ascii,
-                                    imeAction = ImeAction.Done
-                                ),
-                                keyboardActions = KeyboardActions(
-                                    onDone = {
-                                        focusManager.clearFocus()
-                                    }
-                                ),
-                                modifier = Modifier.fillMaxWidth()
-                            )
                         }
                     }
 
-                    if (homeyIdInput.isNotBlank()) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_close),
-                            contentDescription = stringResource(id = R.string.setup_clear_id),
-                            tint = TextSecondary,
+                    if (homeyId.isNotBlank()) {
+                        Box(
+                            contentAlignment = Alignment.Center,
                             modifier = Modifier
-                                .size(18.dp)
+                                .padding(start = 2.dp)
+                                .size(36.dp)
                                 .clickable {
-                                    homeyIdInput = ""
+                                    homeyId = ""
                                     errorMessage = null
                                 }
-                        )
+                        ) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_close),
+                                contentDescription = stringResource(id = R.string.setup_clear_id),
+                                tint = TextSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
                     }
                 }
             }
 
-            // Explanatory hint about keyboard / demo mode
+            // Explanatory hint about Wear OS RemoteInput / demo mode
             item {
                 Text(
                     text = stringResource(id = R.string.setup_input_hint),
@@ -506,11 +611,13 @@ fun SetupScreen(
                 Button(
                     onClick = {
                         errorMessage = null
-                        if (homeyIdInput.trim().equals("demo", ignoreCase = true)) {
+                        val sanitizedId = homeyId.replace(Regex("\\s+"), "")
+                        if (sanitizedId.equals("demo", ignoreCase = true)) {
                             storage.setDemoMode(true)
-                            com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlots(context)
+                            com.dimapp.android.homeywatch.tile.TileSlotManager.syncSlotsAsync(context)
                             onAuthSuccess()
-                        } else if (homeyIdInput.isNotBlank()) {
+                        } else if (sanitizedId.isNotBlank()) {
+                            homeyId = sanitizedId
                             isPairingActive = true
                         } else {
                             errorMessage = context.getString(R.string.setup_error_empty_id)
@@ -603,7 +710,7 @@ fun SetupScreen(
                     item {
                         Chip(
                             onClick = {
-                                homeyIdInput = hub.id
+                                homeyId = hub.id
                                 errorMessage = null
                                 isPairingActive = true
                             },
@@ -711,6 +818,7 @@ fun SetupScreen(
                     )
                 }
             }
+        }
         }
     }
 }

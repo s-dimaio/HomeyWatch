@@ -67,11 +67,15 @@ import kotlinx.coroutines.launch
  *
  * @public
  * @param flowRepo Flow repository handling network calls, caching, and execution proxy.
+ * @param activeHubId Currently selected hub identifier, used to reload flows upon hub switches.
+ * @param isVisible Whether this pager tab is currently visible (used to request rotary scroll focus).
  * @param modifier Screen layout modifier.
  */
 @Composable
 fun FlowsScreen(
     flowRepo: FlowRepository,
+    activeHubId: String? = null,
+    isVisible: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -91,8 +95,13 @@ fun FlowsScreen(
         flows.groupBy { it.folderName ?: generalFolder }
     }
 
-    LaunchedEffect(Unit) {
-        focusRequester.requestFocus()
+    LaunchedEffect(isVisible) {
+        if (isVisible) {
+            focusRequester.requestFocus()
+        }
+    }
+
+    LaunchedEffect(flowRepo, activeHubId) {
         isLoading = true
         when (val result = flowRepo.getFlows()) {
             is HomeyResult.Success -> {
